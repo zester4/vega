@@ -1,0 +1,45 @@
+name = "autonomous-ai-agent"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ─── Public vars (not sensitive) ──────────────────────────────────────────────
+[vars]
+# Your worker URL — update this when you deploy or change ngrok
+UPSTASH_WORKFLOW_URL = "https://autonomous-ai-agent.adesrnd.workers.dev"
+
+# ─── R2 File Storage ──────────────────────────────────────────────────────────
+# Create bucket first: wrangler r2 bucket create vega-agent-files
+#[[r2_buckets]]
+#binding     = "FILES_BUCKET"
+#bucket_name = "vega-agent-files"
+
+# ─── Secrets — set with: wrangler secret put SECRET_NAME ──────────────────────
+# AI & Search
+# GEMINI_API_KEY            → https://aistudio.google.com/apikey
+# SERPER_API_KEY            → https://serper.dev (optional, DuckDuckGo used as fallback)
+
+# Queue & Orchestration
+# QSTASH_TOKEN              → https://console.upstash.com/qstash
+# QSTASH_CURRENT_SIGNING_KEY
+# QSTASH_NEXT_SIGNING_KEY
+
+# Redis
+# UPSTASH_REDIS_REST_URL    → https://console.upstash.com/redis
+# UPSTASH_REDIS_REST_TOKEN
+
+# Vector Memory
+# UPSTASH_VECTOR_REST_URL   → https://console.upstash.com/vector
+# UPSTASH_VECTOR_REST_TOKEN
+
+# Code Execution
+# E2B_API_KEY               → https://e2b.dev (for run_code tool)
+
+# Integrations (all optional — tools degrade gracefully without them)
+# GITHUB_TOKEN              → GitHub personal access token (repo scope)
+# RESEND_API_KEY            → https://resend.com
+# RESEND_FROM_EMAIL         → Your verified sender email
+# TWILIO_ACCOUNT_SID        → https://console.twilio.com
+# TWILIO_AUTH_TOKEN
+# TWILIO_FROM_NUMBER        → E.164 format e.g. +1234567890
+# BROWSERLESS_TOKEN         → https://browserless.io (for browse_web tool)
