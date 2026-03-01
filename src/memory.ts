@@ -145,10 +145,46 @@ export async function getTask(redis: Redis, taskId: string): Promise<AgentTask |
 }
 
 // ─── Schedules registry ───────────────────────────────────────────────────────
+
+export type AgentSchedule = {
+  scheduleId: string;
+  cron: string;
+  description: string;
+  url?: string;
+  body?: string;
+  createdAt?: string;
+};
+
 export async function saveSchedule(
   redis: Redis,
   id: string,
-  info: { scheduleId: string; cron: string; description: string }
+  info: { scheduleId: string; cron: string; description: string; url?: string; body?: string }
 ): Promise<void> {
-  await redis.set(KEY.schedule(id), info, { ex: 60 * 60 * 24 * 30 });
+  const record: AgentSchedule = {
+    scheduleId: info.scheduleId,
+    cron: info.cron,
+    description: info.description,
+    url: info.url,
+    body: info.body,
+    createdAt: new Date().toISOString(),
+  };
+  await redis.set(KEY.schedule(id), record, { ex: 60 * 60 * 24 * 30 });
+}
+
+export async function listTasks(redis: Redis): Promise<AgentTask[]> {
+  const ids = await redis.smembers(KEY.tasks());
+  if (!ids || ids.length === 0) return [];
+  const tasks = await Promise.all(
+    ids.map((id) => redis.get<AgentTask>(KEY.task(id)))
+  );
+  return tasks.filter(Boolean) as AgentTask[];
+}
+
+export async function listSchedules(redis: Redis): Promise<AgentSchedule[]> {
+  const keys = await redis.keys("agent:schedule:*") as string[];
+  if (!keys || keys.length === 0) return [];
+  const records = await Promise.all(
+    keys.map((key) => redis.get<AgentSchedule>(key))
+  );
+  return records.filter(Boolean) as AgentSchedule[];
 }

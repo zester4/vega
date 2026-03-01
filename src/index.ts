@@ -29,10 +29,11 @@ import { Hono } from "hono";
 import { serve } from "@upstash/workflow/cloudflare";
 import { Client as QStashClient, Receiver } from "@upstash/qstash";
 import { runAgent } from "./agent";
-import { getRedis, getTask, updateTask } from "./memory";
+import { getRedis, getTask, updateTask, listTasks, listSchedules, listTools } from "./memory";
 import { workflowHandler } from "./routes/workflow";
 import type { WorkflowPayload } from "./routes/workflow";
 import { think } from "./gemini";
+import { executeTool } from "./tools/builtins";
 import {
   setupTelegramBot,
   disconnectTelegramBot,
@@ -80,6 +81,7 @@ app.post("/chat", async (c) => {
     const body = await c.req.json<{
       message: string;
       sessionId?: string;
+      attachments?: { mimeType: string; data: string }[];
     }>();
 
     if (!body.message?.trim()) {
@@ -99,10 +101,10 @@ app.post("/chat", async (c) => {
     const shouldStream = c.req.header("x-stream") !== "false"; // stream by default
 
     if (shouldStream) {
-      return streamingResponse(c.env, sessionId, body.message);
+      return streamingResponse(c.env, sessionId, body.message, body.attachments);
     } else {
       // Non-streaming fallback (for debugging/testing)
-      const reply = await runAgent(c.env, sessionId, body.message);
+      const reply = await runAgent(c.env, sessionId, body.message, undefined, undefined, undefined, body.attachments);
       return c.json({ reply, sessionId });
     }
   } catch (err) {
@@ -116,7 +118,8 @@ app.post("/chat", async (c) => {
 function streamingResponse(
   env: Env,
   sessionId: string,
-  message: string
+  message: string,
+  attachments?: { mimeType: string; data: string }[]
 ): Response {
   const encoder = new TextEncoder();
 
@@ -139,33 +142,41 @@ function streamingResponse(
         console.log(`[SSE] Session ${sessionId} starting agent...`);
         const startTime = Date.now();
 
-        const reply = await runAgent(env, sessionId, message, undefined, (event) => {
-          if (event.type === "tool-start") {
-            emit(controller, {
-              type: "tool-start",
-              data: {
-                name: event.data.name,
-                input: event.data.input ?? {},
-              },
-            });
-          } else if (event.type === "tool-result") {
-            // Sanitize output — ensure it's serializable
-            let output: unknown = event.data.output;
-            if (typeof output === "undefined") output = null;
-            emit(controller, {
-              type: "tool-result",
-              data: { name: event.data.name, output },
-            });
-          } else if (event.type === "tool-error") {
-            emit(controller, {
-              type: "tool-error",
-              data: {
-                name: event.data.name,
-                error: event.data.error ?? "Unknown error",
-              },
-            });
-          }
-        });
+        const reply = await runAgent(
+          env,
+          sessionId,
+          message,
+          undefined,
+          (event) => {
+            if (event.type === "tool-start") {
+              emit(controller, {
+                type: "tool-start",
+                data: {
+                  name: event.data.name,
+                  input: event.data.input ?? {},
+                },
+              });
+            } else if (event.type === "tool-result") {
+              // Sanitize output — ensure it's serializable
+              let output: unknown = event.data.output;
+              if (typeof output === "undefined") output = null;
+              emit(controller, {
+                type: "tool-result",
+                data: { name: event.data.name, output },
+              });
+            } else if (event.type === "tool-error") {
+              emit(controller, {
+                type: "tool-error",
+                data: {
+                  name: event.data.name,
+                  error: event.data.error ?? "Unknown error",
+                },
+              });
+            }
+          },
+          undefined,
+          attachments
+        );
 
         clearInterval(heartbeat);
 
@@ -302,6 +313,46 @@ app.get("/agents", async (c) => {
   }
 });
 
+// ─── Spawn Sub-agent (for playground/multi-tenant UI) ─────────────────────────
+
+app.post("/agents/spawn", async (c) => {
+  try {
+    const body = await c.req.json<{
+      agentName: string;
+      instructions: string;
+      allowedTools?: string[];
+      memoryPrefix?: string;
+      notifyEmail?: string;
+      priority?: "normal" | "high";
+    }>();
+
+    if (!body.agentName || !body.instructions) {
+      return c.json(
+        { error: "agentName and instructions are required" },
+        400
+      );
+    }
+
+    const result = await executeTool(
+      "spawn_agent",
+      {
+        agentName: body.agentName,
+        instructions: body.instructions,
+        allowedTools: body.allowedTools?.join(","),
+        memoryPrefix: body.memoryPrefix,
+        notifyEmail: body.notifyEmail,
+        priority: body.priority ?? "normal",
+      },
+      c.env
+    );
+
+    return c.json(result);
+  } catch (err) {
+    console.error("[/agents/spawn error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
 // ─── Task-Complete Webhook ────────────────────────────────────────────────────
 // Called by workflowHandler when a sub-agent or long task finishes.
 // The frontend can subscribe to this via EventSource if it's polling.
@@ -359,6 +410,123 @@ app.get("/notifications", async (c) => {
 
     return c.json({ notifications, count: notifications.length });
   } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Tasks & Schedules Registry (for dashboards) ──────────────────────────────
+
+app.get("/tasks", async (c) => {
+  try {
+    const redis = getRedis(c.env);
+    const statusFilter = c.req.query("status") ?? "all";
+    const tasks = await listTasks(redis);
+    const filtered = statusFilter === "all"
+      ? tasks
+      : tasks.filter((t) => t.status === statusFilter);
+    return c.json({ tasks: filtered, count: filtered.length });
+  } catch (err) {
+    console.error("[/tasks error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+app.get("/schedules", async (c) => {
+  try {
+    const redis = getRedis(c.env);
+    const schedules = await listSchedules(redis);
+    return c.json({ schedules, count: schedules.length });
+  } catch (err) {
+    console.error("[/schedules error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Human Approval Registry ───────────────────────────────────────────────────
+
+app.get("/approvals", async (c) => {
+  try {
+    const redis = getRedis(c.env);
+    const statusFilter = c.req.query("status") ?? "all";
+    const raw = await redis.lrange("agent:approvals", 0, 99) as string[];
+    const approvals = raw
+      .map((r: string) => {
+        try {
+          return JSON.parse(r) as {
+            id: string;
+            operation: string;
+            channel: string;
+            metadata?: unknown;
+            status: string;
+            createdAt: string;
+            decidedAt?: string;
+            approved?: boolean;
+            reason?: string;
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean) as Record<string, unknown>[];
+
+    const filtered =
+      statusFilter === "all"
+        ? approvals
+        : approvals.filter((a) => a.status === statusFilter);
+
+    return c.json({ approvals: filtered, count: filtered.length });
+  } catch (err) {
+    console.error("[/approvals error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+app.post("/approvals/:id/decision", async (c) => {
+  try {
+    const id = c.req.param("id");
+    const body = await c.req.json<{
+      approved: boolean;
+      reason?: string;
+    }>();
+
+    const redis = getRedis(c.env);
+    const key = `agent:approval:${id}`;
+    const existingRaw = await redis.get<string>(key);
+    if (!existingRaw) {
+      return c.json({ error: "Approval request not found" }, 404);
+    }
+
+    let record: any;
+    try {
+      record = JSON.parse(existingRaw);
+    } catch {
+      record = { id };
+    }
+
+    record.status = body.approved ? "approved" : "rejected";
+    record.approved = body.approved;
+    record.reason = body.reason ?? record.reason ?? null;
+    record.decidedAt = new Date().toISOString();
+
+    await redis.set(key, JSON.stringify(record), { ex: 60 * 60 * 24 });
+
+    // Also update the rolling approvals list
+    const listRaw = await redis.lrange("agent:approvals", 0, 199) as string[];
+    for (let i = 0; i < listRaw.length; i++) {
+      try {
+        const item = JSON.parse(listRaw[i]);
+        if (item.id === id) {
+          await redis.lset("agent:approvals", i, JSON.stringify(record));
+          break;
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
+    return c.json({ success: true, approval: record });
+  } catch (err) {
+    console.error("[/approvals/:id/decision error]", err);
     return c.json({ error: String(err) }, 500);
   }
 });
@@ -531,12 +699,92 @@ Max 80 words. Be specific and actionable.`,
       iso: new Date().toISOString(),
     }), { ex: 60 * 60 * 25 }); // 25 hours TTL
 
+    // Self-evolving tool ecosystem: analyze usage and create composite tools when helpful
+    try {
+      await analyzeToolUsageAndEvolve(c.env);
+    } catch (e) {
+      console.error("[ToolEvolution error]", e);
+    }
+
     return c.json({ success: true, reflection });
   } catch (err) {
     console.error("[/cron/tick error]", err);
     return c.json({ error: String(err) }, 500);
   }
 });
+
+// ─── Self-evolving tool ecosystem helper ───────────────────────────────────────
+
+async function analyzeToolUsageAndEvolve(env: Env): Promise<void> {
+  const redis = getRedis(env);
+
+  const usageKeys = await redis.keys("agent:tool-usage:*") as string[];
+  if (!usageKeys || usageKeys.length === 0) return;
+
+  const usageCounts: Record<string, number> = {};
+  for (const key of usageKeys) {
+    const raw = await redis.get(key);
+    const count = Number(raw ?? 0);
+    const name = key.replace("agent:tool-usage:", "");
+    usageCounts[name] = count;
+  }
+
+  // Example heuristic: if web_search is heavily used and we don't yet have
+  // a composite "web_research_and_summarize" tool, create it automatically.
+  const webSearchCount = usageCounts["web_search"] ?? 0;
+  if (webSearchCount < 25) return; // require some real usage before evolving
+
+  const tools = await listTools(redis);
+  const alreadyExists = tools.some((t) => t.name === "web_research_and_summarize");
+  const alreadyFlagged = await redis.get("agent:self-tool:web_research_and_summarize");
+
+  if (alreadyExists || alreadyFlagged) {
+    return;
+  }
+
+  const description =
+    "Perform end-to-end web research and summarization for a query: " +
+    "1) search the web, 2) fetch the most relevant pages, 3) synthesize a concise, well-structured summary with sources.";
+
+  const requirements =
+    "Use web_search to find relevant pages, then fetch_url to read them, " +
+    "then synthesize a markdown report that includes an executive summary, key findings, and a sources list. " +
+    "Return a JSON object with { summary, sources } where sources is an array of { title, url }.";
+
+  const parameters = JSON.stringify({
+    properties: {
+      query: {
+        type: "string",
+        description: "The research query to investigate using the web.",
+      },
+      maxSources: {
+        type: "number",
+        description: "Maximum number of pages to fetch and consider (default 5).",
+      },
+    },
+    required: ["query"],
+  });
+
+  try {
+    const result = await executeTool(
+      "create_tool",
+      {
+        name: "web_research_and_summarize",
+        description,
+        requirements,
+        parameters,
+      },
+      env
+    );
+
+    console.log("[ToolEvolution] Created composite tool:", result);
+    await redis.set("agent:self-tool:web_research_and_summarize", "1", {
+      ex: 60 * 60 * 24 * 7,
+    });
+  } catch (e) {
+    console.error("[ToolEvolution create_tool failed]", e);
+  }
+}
 
 // ─── Memory API (for frontend Memory page) ────────────────────────────────────
 app.get("/memory", async (c) => {

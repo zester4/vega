@@ -52,6 +52,24 @@
  *     send_email        → Send email via Resend
  *     send_sms          → Send SMS via Twilio
  *
+ *   IMAGE & VOICE
+ *     generate_image    → Gemini 3.1 Flash Image Preview (Nano Banana 2)
+ *     text_to_speech    → ElevenLabs TTS (32 languages, MP3 to R2)
+ *     speech_to_text    → ElevenLabs Scribe v2 STT (90+ languages)
+ *
+ *   MARKET INTELLIGENCE
+ *     market_data       → Yahoo Finance live prices, portfolio, alerts
+ *
+ *   LANGUAGE
+ *     translate         → Gemini-powered translation (32+ languages)
+ *
+ *   GOALS & PROACTIVE
+ *     manage_goals      → Long-term goal tracking with milestones
+ *     proactive_notify  → Push Telegram messages without user prompt
+ *
+ *   WEB SCRAPING
+ *     firecrawl         → Deep scraping: JS pages, PDFs, anti-bot
+ *
  * ============================================================================
  */
 
@@ -419,6 +437,79 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  // ── CRON REGISTRY & APPROVALS ──────────────────────────────────────────────
+
+  {
+    name: "list_crons",
+    description: "List all known cron schedules created by this agent, including cron expressions, descriptions, and destinations.",
+    parameters: {
+      properties: {},
+      required: [],
+    },
+  },
+
+  {
+    name: "update_cron",
+    description: "Update an existing cron schedule's cadence, body, and/or description. Under the hood this recreates the schedule safely.",
+    parameters: {
+      properties: {
+        scheduleId: { type: "string", description: "The scheduleId returned when the cron was created (or from list_crons)" },
+        cron: { type: "string", description: "New cron expression (leave empty to keep current)" },
+        body: { type: "string", description: "New JSON body string to send with each run (leave empty to keep current)" },
+        description: { type: "string", description: "Updated human-readable description" },
+      },
+      required: ["scheduleId"],
+    },
+  },
+
+  {
+    name: "delete_cron",
+    description: "Delete a cron schedule. The job will no longer run. This also removes local metadata.",
+    parameters: {
+      properties: {
+        scheduleId: { type: "string", description: "The scheduleId of the cron to delete" },
+      },
+      required: ["scheduleId"],
+    },
+  },
+
+  {
+    name: "human_approval_gate",
+    description: "Request explicit human approval before performing a sensitive operation (e.g. sending email, modifying repos). Creates an approval record and notifies the configured channel(s). Returns a pending status that can be checked later.",
+    parameters: {
+      properties: {
+        operation: { type: "string", description: "Plain-English description of what you want to do, including risks and impact" },
+        channel: { type: "string", description: "Where to request approval: 'ui', 'telegram', 'email', or 'all' (default: 'ui')", enum: ["ui", "telegram", "email", "all"] },
+        metadata: { type: "object", description: "Optional JSON metadata (e.g. { repo, branch, files }) that helps the user decide" },
+      },
+      required: ["operation"],
+    },
+  },
+
+  {
+    name: "ingest_knowledge_base",
+    description: "Fetch and embed external knowledge into long-term semantic memory. Provide URLs and/or raw texts; content will be chunked and stored in Upstash Vector for later semantic_recall/RAG.",
+    parameters: {
+      properties: {
+        urls: {
+          type: "array",
+          description: "Array of URLs (articles, docs, blogs, API docs) to ingest",
+          items: { type: "string" },
+        },
+        texts: {
+          type: "array",
+          description: "Raw text snippets or documents to embed directly",
+          items: { type: "string" },
+        },
+        topic: {
+          type: "string",
+          description: "Optional high-level topic label for these sources (used as metadata tag)",
+        },
+      },
+      required: [],
+    },
+  },
+
   // ── INTEGRATIONS ────────────────────────────────────────────────────────────
 
   {
@@ -465,6 +556,177 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  // ── IMAGE GENERATION (Gemini Nano Banana 2) ────────────────────────────────
+
+  {
+    name: "generate_image",
+    description:
+      "Generate or edit images using Gemini 3.1 Flash Image Preview (Nano Banana 2 — gemini-3.1-flash-image-preview). Creates high-quality images from text prompts, or edits existing images with reference+instruction. Images are stored in R2 and returned as URLs (no token bloat). Supports 1K (default), 2K, 4K resolutions and multiple aspect ratios.",
+    parameters: {
+      properties: {
+        prompt: { type: "string", description: "Detailed text description of the image to generate. Be very descriptive for best results." },
+        resolution: { type: "string", description: "Image resolution: '1K' (default, fast), '2K' (high quality), '4K' (ultra)", enum: ["1K", "2K", "4K"] },
+        aspectRatio: { type: "string", description: "Aspect ratio: '1:1' (default, square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4', '5:4', '4:5'", enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "5:4", "4:5"] },
+        referenceImageBase64: { type: "string", description: "Base64 encoded reference image for image editing (strip the data URI prefix)." },
+        referenceImageMime: { type: "string", description: "MIME type of reference image", enum: ["image/jpeg", "image/png", "image/webp"] },
+        editInstruction: { type: "string", description: "When editing an existing image, describe the desired changes" },
+      },
+      required: [],
+    },
+  },
+
+  // ── TEXT TO SPEECH (ElevenLabs) ─────────────────────────────────────────────
+
+  {
+    name: "text_to_speech",
+    description:
+      "Convert text to lifelike speech using ElevenLabs. Generates MP3 stored in R2. Perfect for voice content, narrations, Telegram voice replies. Models: 'flash' (75ms, real-time), 'multilingual' (best quality, 32 languages), 'turbo' (balanced), 'v3' (most expressive). Requires ELEVENLABS_API_KEY.",
+    parameters: {
+      properties: {
+        text: { type: "string", description: "Text to convert to speech (max 5000 chars)" },
+        voiceId: { type: "string", description: "ElevenLabs voice ID. Defaults to Rachel. Find voices at elevenlabs.io/voice-library" },
+        model: { type: "string", description: "TTS model: 'flash' (fastest 75ms), 'multilingual' (best quality), 'turbo' (balanced), 'v3' (most expressive)", enum: ["flash", "multilingual", "turbo", "v3"] },
+        languageCode: { type: "string", description: "ISO 639-1 language code for normalization (e.g. 'en', 'es', 'fr', 'zh')" },
+        stability: { type: "number", description: "Voice stability 0-1 (default 0.5). Higher = more consistent." },
+        similarityBoost: { type: "number", description: "Similarity boost 0-1 (default 0.75)." },
+      },
+      required: ["text"],
+    },
+  },
+
+  // ── SPEECH TO TEXT (ElevenLabs Scribe v2) ───────────────────────────────────
+
+  {
+    name: "speech_to_text",
+    description:
+      "Transcribe audio to text using ElevenLabs Scribe v2 — state-of-the-art accuracy across 90+ languages. Supports speaker diarization, audio event tagging, and word-level timestamps. Accepts a public audio URL, R2 filename, or base64 audio. Requires ELEVENLABS_API_KEY.",
+    parameters: {
+      properties: {
+        audioUrl: { type: "string", description: "Public URL to audio/video file (MP3, WAV, OGG, MP4, etc.)" },
+        audioBase64: { type: "string", description: "Base64 encoded audio data (for smaller files)" },
+        mimeType: { type: "string", description: "MIME type: 'audio/mpeg', 'audio/ogg', 'audio/wav', 'video/mp4'" },
+        filename: { type: "string", description: "R2 bucket key if audio is already stored (e.g. 'voice/recording.mp3')" },
+        languageCode: { type: "string", description: "ISO 639-1 code if known (improves accuracy). Leave empty for auto-detect." },
+        diarize: { type: "boolean", description: "Identify different speakers (default false)" },
+        tagAudioEvents: { type: "boolean", description: "Tag non-speech events like [laughter], [music] (default true)" },
+      },
+      required: [],
+    },
+  },
+
+  // ── MARKET DATA (Yahoo Finance — free, no API key) ──────────────────────────
+
+  {
+    name: "market_data",
+    description:
+      "Real-time and historical market data via Yahoo Finance (free, no API key needed). Actions: 'quote' (single live price), 'multi_quote' (batch up to 20 symbols), 'history' (OHLCV historical data), 'search' (find ticker symbols), 'portfolio' (tracked positions with live prices), 'set_alert' (price alert → proactive Telegram push), 'list_alerts', 'delete_alert', 'news' (latest market news). Works for stocks, crypto (BTC-USD), ETFs, forex (EURUSD=X).",
+    parameters: {
+      properties: {
+        action: { type: "string", enum: ["quote", "multi_quote", "history", "search", "portfolio", "set_alert", "list_alerts", "delete_alert", "news"], description: "Action to perform" },
+        symbol: { type: "string", description: "Ticker symbol e.g. AAPL, BTC-USD, EURUSD=X, ETH-USD, MSFT, TSLA" },
+        symbols: { type: "array", description: "Multiple symbols for multi_quote (max 20)", items: { type: "string" } },
+        range: { type: "string", description: "Historical range: '1d','5d','1mo','3mo','6mo','1y','2y','5y','ytd','max'" },
+        interval: { type: "string", description: "Data interval: '1m','5m','15m','30m','1h','1d','1wk','1mo'" },
+        query: { type: "string", description: "Company name to search for ticker symbols" },
+        targetPrice: { type: "number", description: "Price target for set_alert" },
+        direction: { type: "string", enum: ["above", "below"], description: "Alert trigger direction" },
+        telegramChatId: { type: "string", description: "Telegram chat ID to notify when price alert triggers" },
+        alertId: { type: "string", description: "Alert ID for delete_alert" },
+      },
+      required: ["action"],
+    },
+  },
+
+  // ── GOAL MANAGEMENT ──────────────────────────────────────────────────────────
+
+  {
+    name: "manage_goals",
+    description:
+      "Create and track long-term goals with milestones and autonomous progress pursuit. VEGA checks active goals every session and proactively advances them. Goals can trigger Telegram notifications at progress milestones (25%, 50%, 75%, 100%). Stalled high-priority goals are auto-notified via cron.",
+    parameters: {
+      properties: {
+        action: { type: "string", enum: ["create_goal", "update_progress", "list_goals", "get_goal", "complete_goal", "delete_goal", "complete_milestone", "check_all"], description: "Action to perform" },
+        title: { type: "string", description: "Goal title (required for create_goal)" },
+        description: { type: "string", description: "Detailed goal description" },
+        category: { type: "string", description: "Goal category: business, research, personal, monitoring, custom" },
+        priority: { type: "string", enum: ["low", "medium", "high", "critical"], description: "Priority level" },
+        milestones: { type: "array", description: "List of milestone titles (strings)", items: { type: "string" } },
+        nextAction: { type: "string", description: "What VEGA should do next to advance this goal" },
+        notifyOnProgress: { type: "boolean", description: "Send Telegram notification at milestone progress percentages" },
+        telegramChatId: { type: "string", description: "Telegram chat ID for progress notifications" },
+        goalId: { type: "string", description: "Goal ID (required for update/complete/delete)" },
+        milestoneId: { type: "string", description: "Milestone ID for complete_milestone" },
+        progress: { type: "number", description: "Progress percentage 0-100 for update_progress" },
+        notes: { type: "string", description: "Progress notes or next action" },
+        status: { type: "string", description: "Filter goals by status: active, completed, paused, cancelled" },
+      },
+      required: ["action"],
+    },
+  },
+
+  // ── PROACTIVE TELEGRAM NOTIFY ─────────────────────────────────────────────────
+
+  {
+    name: "proactive_notify",
+    description:
+      "Send a proactive Telegram message WITHOUT waiting for user input. VEGA initiates the conversation. Use for: task completion, price alerts, goal milestones, error spikes, breaking news, scheduled briefings. The message appears as a new Telegram message. Requires Telegram bot to be connected.",
+    parameters: {
+      properties: {
+        chatId: { type: "string", description: "Telegram chat ID. Users can find their chat ID via the /status command." },
+        message: { type: "string", description: "HTML-formatted message. Supports <b>bold</b>, <i>italic</i>, <code>code</code>, <a href='url'>links</a>" },
+      },
+      required: ["chatId", "message"],
+    },
+  },
+
+  // ── TRANSLATION & MULTI-LANGUAGE ─────────────────────────────────────────────
+
+  {
+    name: "translate",
+    description:
+      "Translate, detect language, and localize content across 32+ languages. Powered by Gemini (no extra API key). Actions: 'detect' (auto-detect language), 'translate' (text translation), 'translate_document' (preserve markdown/HTML structure), 'multilingual_search' (generate queries in multiple languages for international research), 'localize' (cultural adaptation), 'list_languages'. Languages: English, Spanish, French, German, Portuguese, Italian, Dutch, Polish, Russian, Ukrainian, Arabic, Hebrew, Farsi, Chinese (Simplified/Traditional), Japanese, Korean, Hindi, Bengali, Tamil, Turkish, Vietnamese, Thai, Indonesian, Swahili, Hausa, Amharic, Yoruba, Igbo, and more.",
+    parameters: {
+      properties: {
+        action: { type: "string", enum: ["detect", "translate", "translate_document", "multilingual_search", "localize", "list_languages"], description: "Translation action" },
+        text: { type: "string", description: "Text to detect or translate" },
+        content: { type: "string", description: "Document content for translate_document or localize" },
+        query: { type: "string", description: "Search query for multilingual_search" },
+        targetLanguage: { type: "string", description: "Target language ISO code: 'es', 'fr', 'de', 'zh-CN', 'ar', 'ja', 'ko', 'hi', 'ru', 'pt', etc." },
+        sourceLanguage: { type: "string", description: "Source language ISO code (optional, auto-detected if not set)" },
+        languages: { type: "array", description: "Target languages for multilingual_search (max 5)", items: { type: "string" } },
+        format: { type: "string", enum: ["markdown", "html", "plain"], description: "Document format for translate_document" },
+        formality: { type: "string", enum: ["formal", "informal", "neutral"], description: "Tone of translation" },
+        targetLocale: { type: "string", description: "Locale for cultural adaptation e.g. 'es-MX', 'zh-CN', 'fr-FR', 'ar-AE'" },
+        context: { type: "string", enum: ["marketing", "technical", "legal", "casual", "general"], description: "Content context for localize" },
+      },
+      required: ["action"],
+    },
+  },
+
+  // ── FIRECRAWL (Deep Web Scraping) ─────────────────────────────────────────────
+
+  {
+    name: "firecrawl",
+    description:
+      "Advanced web scraping using Firecrawl — handles JavaScript-rendered pages, React/Next.js SPAs, anti-bot protection, and PDFs. Far superior to fetch_url for complex modern sites. Modes: 'scrape' (single URL → clean Markdown), 'search' (web search + full content extraction in one call), 'crawl' (entire website → Markdown, async job), 'extract' (get crawl job status/results). Requires FIRECRAWL_API_KEY (free at firecrawl.dev).",
+    parameters: {
+      properties: {
+        mode: { type: "string", enum: ["scrape", "search", "crawl", "extract"], description: "Operation mode" },
+        url: { type: "string", description: "URL to scrape or crawl (required for scrape/crawl modes)" },
+        query: { type: "string", description: "Search query (required for search mode)" },
+        formats: { type: "array", description: "Output formats: ['markdown', 'html', 'links', 'json']", items: { type: "string" } },
+        extractPrompt: { type: "string", description: "AI extraction prompt e.g. 'Extract all product prices and names'" },
+        limit: { type: "number", description: "Max pages to crawl (max 100) or search results (max 10)" },
+        prompt: { type: "string", description: "Natural language crawl directive e.g. 'Only crawl API documentation pages'" },
+        crawlJobId: { type: "string", description: "Crawl job ID to poll status (extract mode)" },
+        waitFor: { type: "number", description: "Milliseconds to wait for dynamic content to load" },
+        lang: { type: "string", description: "Language code for search results (e.g. 'en', 'es')" },
+        scrapeContent: { type: "boolean", description: "Fetch full content from search results (default true)" },
+      },
+      required: ["mode"],
+    },
+  },
+
 ] as const;
 
 // ─── Type Helpers ─────────────────────────────────────────────────────────────
@@ -478,6 +740,17 @@ export async function executeTool(
   env: Env
 ): Promise<Record<string, unknown>> {
   try {
+    // Track tool usage for self-evolution heuristics
+    try {
+      const { getRedis } = await import("../memory");
+      const redis = getRedis(env);
+      const key = `agent:tool-usage:${toolName}`;
+      await redis.incr(key);
+      await redis.expire(key, 60 * 60 * 24); // 24h window
+    } catch (usageErr) {
+      console.warn("[ToolUsage] Failed to record usage:", String(usageErr));
+    }
+
     switch (toolName) {
 
       // Search & Fetch
@@ -518,11 +791,34 @@ export async function executeTool(
       // Scheduling
       case "schedule_cron": return await execScheduleCron(args, env);
       case "get_datetime": return execGetDatetime(args);
+      case "list_crons": return await execListCrons(args, env);
+      case "update_cron": return await execUpdateCron(args, env);
+      case "delete_cron": return await execDeleteCron(args, env);
+      case "human_approval_gate": return await execHumanApprovalGate(args, env);
+      case "ingest_knowledge_base": return await execIngestKnowledgeBase(args, env);
 
       // Integrations
       case "github": return await execGithub(args, env);
       case "send_email": return await execSendEmail(args, env);
       case "send_sms": return await execSendSMS(args, env);
+
+      // Image & Voice
+      case "generate_image": return await execGenerateImageTool(args, env);
+      case "text_to_speech": return await execTextToSpeechTool(args, env);
+      case "speech_to_text": return await execSpeechToTextTool(args, env);
+
+      // Market Intelligence
+      case "market_data": return await execMarketDataTool(args, env);
+
+      // Goals & Proactive
+      case "manage_goals": return await execManageGoalsTool(args, env);
+      case "proactive_notify": return await execProactiveNotifyTool(args, env);
+
+      // Language
+      case "translate": return await execTranslateTool(args, env);
+
+      // Web Scraping
+      case "firecrawl": return await execFirecrawlTool(args, env);
 
       default: return await execDynamicTool(toolName, args, env);
     }
@@ -1446,6 +1742,21 @@ async function execScheduleCron(args: ToolArgs, env: Env): Promise<Record<string
     headers: { "Content-Type": "application/json" },
   });
 
+  // Persist schedule metadata so the agent and UI can list/manage crons
+  try {
+    const { getRedis, saveSchedule } = await import("../memory");
+    const redis = getRedis(env);
+    await saveSchedule(redis, result.scheduleId, {
+      scheduleId: result.scheduleId,
+      cron,
+      description,
+      url,
+      body: body ?? "{}",
+    });
+  } catch (e) {
+    console.warn("[schedule_cron] Failed to save schedule metadata:", String(e));
+  }
+
   return {
     success: true,
     scheduleId: result.scheduleId,
@@ -1476,6 +1787,271 @@ function execGetDatetime(args: ToolArgs): Record<string, unknown> {
   } catch {
     return { utc: now.toISOString(), timestamp: now.getTime() };
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRON REGISTRY TOOLS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function execListCrons(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { getRedis, listSchedules } = await import("../memory");
+  const redis = getRedis(env);
+  const schedules = await listSchedules(redis);
+  return { schedules, count: schedules.length };
+}
+
+async function execDeleteCron(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { scheduleId } = args as { scheduleId: string };
+  if (!scheduleId) return { success: false, error: "scheduleId is required" };
+
+  try {
+    // Delete from QStash
+    await fetch(`https://qstash.upstash.io/v2/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${env.QSTASH_TOKEN}`,
+      },
+    });
+  } catch (e) {
+    console.warn("[delete_cron] Failed to delete from QStash:", String(e));
+  }
+
+  try {
+    const { getRedis } = await import("../memory");
+    const redis = getRedis(env);
+    await redis.del(`agent:schedule:${scheduleId}`);
+  } catch (e) {
+    console.warn("[delete_cron] Failed to delete schedule metadata:", String(e));
+  }
+
+  return { success: true, scheduleId };
+}
+
+async function execUpdateCron(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { scheduleId, cron, body, description } = args as {
+    scheduleId: string;
+    cron?: string;
+    body?: string;
+    description?: string;
+  };
+
+  if (!scheduleId) return { success: false, error: "scheduleId is required" };
+
+  const { getRedis } = await import("../memory");
+  const redis = getRedis(env);
+  const existing = await redis.get<{
+    scheduleId: string;
+    cron: string;
+    description: string;
+    url?: string;
+    body?: string;
+  }>(`agent:schedule:${scheduleId}`);
+
+  if (!existing) {
+    return { success: false, error: `No schedule metadata found for ${scheduleId}` };
+  }
+
+  const newCron = cron ?? existing.cron;
+  const newBody = body ?? existing.body ?? "{}";
+  const newDescription = description ?? existing.description;
+
+  // Delete old schedule in QStash
+  try {
+    await fetch(`https://qstash.upstash.io/v2/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${env.QSTASH_TOKEN}`,
+      },
+    });
+  } catch (e) {
+    console.warn("[update_cron] Failed to delete old schedule from QStash:", String(e));
+  }
+
+  // Recreate with updated config
+  const qstash = new QStashClient({ token: env.QSTASH_TOKEN });
+  const created = await qstash.schedules.create({
+    destination: existing.url ?? "",
+    cron: newCron,
+    body: newBody,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  // Save new metadata and remove old record if scheduleId changed
+  try {
+    const { saveSchedule } = await import("../memory");
+    await saveSchedule(redis, created.scheduleId, {
+      scheduleId: created.scheduleId,
+      cron: newCron,
+      description: newDescription,
+      url: existing.url,
+      body: newBody,
+    });
+    if (created.scheduleId !== scheduleId) {
+      await redis.del(`agent:schedule:${scheduleId}`);
+    }
+  } catch (e) {
+    console.warn("[update_cron] Failed to save updated schedule metadata:", String(e));
+  }
+
+  return {
+    success: true,
+    oldScheduleId: scheduleId,
+    scheduleId: created.scheduleId,
+    cron: newCron,
+    description: newDescription,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HUMAN APPROVAL GATE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function execHumanApprovalGate(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { operation, channel = "ui", metadata } = args as {
+    operation: string;
+    channel?: "ui" | "telegram" | "email" | "all";
+    metadata?: Record<string, unknown>;
+  };
+
+  const { getRedis } = await import("../memory");
+  const redis = getRedis(env);
+
+  const requestId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const record = {
+    id: requestId,
+    operation,
+    channel,
+    metadata: metadata ?? {},
+    status: "pending" as const,
+    createdAt: new Date().toISOString(),
+  };
+
+  // Persist request
+  await redis.set(`agent:approval:${requestId}`, JSON.stringify(record), {
+    ex: 60 * 60 * 24,
+  });
+  await redis.lpush("agent:approvals", JSON.stringify(record));
+  await redis.ltrim("agent:approvals", 0, 99);
+
+  // Optional: notify via Telegram if configured
+  if ((channel === "telegram" || channel === "all") && env.TELEGRAM_BOT_TOKEN) {
+    try {
+      const { getTelegramConfig, TelegramBot } = await import("../telegram");
+      const config = await getTelegramConfig(env);
+      if (config) {
+        const bot = new TelegramBot(config.token);
+        const text = `⚠️ Approval requested\n\nOperation:\n${operation}\n\nRequest ID: ${requestId}\n\nUse the dashboard or inline buttons to approve or reject.`;
+        await bot.sendMessage(config.botId, text, {
+          parse_mode: "HTML",
+        });
+      }
+    } catch (e) {
+      console.warn("[human_approval_gate] Telegram notification failed:", String(e));
+    }
+  }
+
+  // Email notification could be added here using send_email, but we avoid
+  // calling tools recursively from within tools to keep execution simple.
+
+  return {
+    ...record,
+    message: "Approval requested. Status is pending. Call this tool again later or poll the approvals API to see the final decision.",
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KNOWLEDGE BASE INGESTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function execIngestKnowledgeBase(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { urls = [], texts = [], topic } = args as {
+    urls?: string[];
+    texts?: string[];
+    topic?: string;
+  };
+
+  const normalizedUrls = Array.isArray(urls) ? urls : [];
+  const normalizedTexts = Array.isArray(texts) ? texts : [];
+
+  const sources: { type: "url" | "text"; id: string; content: string }[] = [];
+
+  // Fetch URLs
+  for (const url of normalizedUrls) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "VEGA-Agent/1.0",
+          "Accept": "text/html,application/json,*/*;q=0.9",
+        },
+      });
+      const contentType = res.headers.get("content-type") ?? "";
+      let text: string;
+      if (contentType.includes("application/json")) {
+        const json = await res.json();
+        text = JSON.stringify(json).slice(0, 8000);
+      } else {
+        const raw = await res.text();
+        text = stripHtml(raw).slice(0, 8000);
+      }
+      if (text.trim().length > 0) {
+        sources.push({ type: "url", id: url, content: text });
+      }
+    } catch (e) {
+      console.warn("[ingest_knowledge_base] Failed to fetch URL:", url, String(e));
+    }
+  }
+
+  // Raw texts
+  normalizedTexts.forEach((t, idx) => {
+    if (t && String(t).trim().length > 0) {
+      sources.push({ type: "text", id: `text-${idx}`, content: String(t) });
+    }
+  });
+
+  if (sources.length === 0) {
+    return { success: false, error: "No content to ingest. Provide urls and/or texts." };
+  }
+
+  const { upsertMemory } = await import("./vector-memory");
+  let chunkCount = 0;
+
+  for (const source of sources) {
+    const chunks = chunkText(source.content, 800);
+    for (let i = 0; i < chunks.length; i++) {
+      const id = `kb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${chunkCount}`;
+      const metadata: Record<string, unknown> = {
+        sourceType: source.type,
+        sourceId: source.id,
+        index: i,
+      };
+      if (topic) metadata.topic = topic;
+      await upsertMemory(env, id, chunks[i], metadata);
+      chunkCount += 1;
+    }
+  }
+
+  return {
+    success: true,
+    sources: sources.length,
+    chunks: chunkCount,
+    topic: topic ?? null,
+  };
+}
+
+function chunkText(text: string, maxLen: number): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  const sentences = text.split(/(?<=[\.!\?])\s+/);
+  for (const s of sentences) {
+    if ((current + " " + s).length > maxLen) {
+      if (current) chunks.push(current.trim());
+      current = s;
+    } else {
+      current = current ? `${current} ${s}` : s;
+    }
+  }
+  if (current.trim().length > 0) chunks.push(current.trim());
+  return chunks;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1623,6 +2199,54 @@ async function execSendEmail(args: ToolArgs, env: Env): Promise<Record<string, u
     return { success: false, error: String(e) };
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW TOOL LAZY EXECUTOR WRAPPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function execGenerateImageTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execGenerateImage } = await import("./generate-image");
+  return execGenerateImage(args, env);
+}
+
+async function execTextToSpeechTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execTextToSpeech } = await import("./voice");
+  return execTextToSpeech(args, env);
+}
+
+async function execSpeechToTextTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execSpeechToText } = await import("./voice");
+  return execSpeechToText(args, env);
+}
+
+async function execMarketDataTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execMarketData } = await import("./market");
+  return execMarketData(args, env);
+}
+
+async function execManageGoalsTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execManageGoals } = await import("./goals");
+  return execManageGoals(args, env);
+}
+
+async function execProactiveNotifyTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execProactiveNotify } = await import("./goals");
+  return execProactiveNotify(args, env);
+}
+
+async function execTranslateTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execTranslate } = await import("./translate");
+  return execTranslate(args, env);
+}
+
+async function execFirecrawlTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { execFirecrawl } = await import("./firecrawl");
+  return execFirecrawl(args, env);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INTEGRATION IMPLEMENTATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 async function execSendSMS(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
   if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) {

@@ -38,7 +38,7 @@ async function proxy(req: NextRequest, segments: string[]): Promise<NextResponse
         return NextResponse.json(data, { status: res.status });
     } catch (err) {
         return NextResponse.json(
-            { error: `Proxy error: ${String(err)}` },
+            { error: `Proxy error (target: ${url}): ${String(err)}` },
             { status: 502 }
         );
     }

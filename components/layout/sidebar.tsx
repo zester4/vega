@@ -3,7 +3,19 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { BotIcon, MenuIcon, XIcon, MessageSquareIcon, SettingsIcon, DatabaseIcon, WrenchIcon, HistoryIcon, ChevronLeftIcon } from "lucide-react";
+import {
+  ActivityIcon,
+  BotIcon,
+  ChevronLeftIcon,
+  HistoryIcon,
+  MenuIcon,
+  MessageSquareIcon,
+  RocketIcon,
+  SettingsIcon,
+  WrenchIcon,
+  DatabaseIcon,
+  XIcon,
+} from "lucide-react";
 import { NavItem } from "./nav-item";
 import { cn } from "@/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
@@ -138,6 +150,16 @@ export function Sidebar() {
             href="/tools"
             label={isCollapsed ? "" : "Tools"}
             icon={WrenchIcon}
+          />
+          <NavItem
+            href="/tasks"
+            label={isCollapsed ? "" : "Mission Control"}
+            icon={ActivityIcon}
+          />
+          <NavItem
+            href="/playground"
+            label={isCollapsed ? "" : "Playground"}
+            icon={RocketIcon}
           />
           <NavItem
             href="/history"

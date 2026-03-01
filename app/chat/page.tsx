@@ -14,7 +14,14 @@
 import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { nanoid } from "nanoid";
-import { CopyIcon, RefreshCwIcon, ArrowUpIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  CopyIcon,
+  PaperclipIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  XIcon,
+} from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -34,6 +41,13 @@ interface ChatMessage {
   content: string;
   tools?: ToolCall[];       // tool calls that happened during this assistant turn
   timestamp: number;
+}
+
+interface AttachmentPayload {
+  id: string;
+  name: string;
+  mimeType: string;
+  data: string; // base64
 }
 
 interface StoredSession {
@@ -73,6 +87,7 @@ const getToolIcon = (name: string) =>
 
 function ToolStream({ tools }: { tools: ToolCall[] }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [decidingApproval, setDecidingApproval] = useState<string | null>(null);
 
   if (!tools || tools.length === 0) return null;
 
@@ -88,6 +103,21 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
         <AnimatePresence>
           {tools.map((tool) => {
             const isOpen = expanded[tool.id] ?? (tool.status === "running");
+
+            // Detect human_approval_gate outputs
+            const approval =
+              tool.name === "human_approval_gate" &&
+              tool.output &&
+              typeof tool.output === "object"
+                ? (tool.output as {
+                    id?: string;
+                    operation?: string;
+                    status?: string;
+                    channel?: string;
+                    message?: string;
+                  })
+                : null;
+
             return (
               <motion.div
                 key={tool.id}
@@ -139,17 +169,134 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                       )}
                       {(tool.output || tool.errorText) && (
                         <div className="px-3 py-2 bg-[#0a0a0b]/50">
-                          <p className={`text-[10px] uppercase mb-1 ${tool.errorText ? "text-red-400" : "text-[#6b6b7a]"}`}>
-                            {tool.errorText ? "Error" : "Output"}
-                          </p>
-                          {tool.errorText ? (
-                            <pre className="text-red-400 overflow-x-auto max-h-24 scrollbar-thin">{tool.errorText}</pre>
+                          {/* Human approval special-case */}
+                          {approval ? (
+                            <div className="space-y-2">
+                              <p className="text-[10px] font-semibold text-[#e8e8ea] uppercase">
+                                Human Approval Required
+                              </p>
+                              {approval.operation && (
+                                <p className="text-[10px] text-[#e8e8ea]/80 whitespace-pre-wrap">
+                                  {approval.operation}
+                                </p>
+                              )}
+                              <p className="text-[10px] text-[#6b6b7a]">
+                                ID:{" "}
+                                <span className="font-mono">
+                                  {approval.id ?? "unknown"}
+                                </span>{" "}
+                                • Channel:{" "}
+                                <span className="uppercase">
+                                  {approval.channel ?? "ui"}
+                                </span>
+                              </p>
+                              <p className="text-[10px] text-[#4a4a58]">
+                                {approval.message ??
+                                  "Review this operation and approve or reject it. This decision will be recorded for the agent to read."}
+                              </p>
+                              {approval.status === "pending" && approval.id && (
+                                <div className="flex items-center gap-2 pt-1">
+                                  <button
+                                    disabled={decidingApproval === approval.id}
+                                    onClick={async () => {
+                                      try {
+                                        setDecidingApproval(approval.id!);
+                                        await fetch(
+                                          `/api/approvals/${approval.id}/decision`,
+                                          {
+                                            method: "POST",
+                                            headers: {
+                                              "Content-Type":
+                                                "application/json",
+                                            },
+                                            body: JSON.stringify({
+                                              approved: false,
+                                            }),
+                                          }
+                                        );
+                                      } catch (e) {
+                                        console.error(
+                                          "[Approval reject error]",
+                                          e
+                                        );
+                                      } finally {
+                                        setDecidingApproval(null);
+                                      }
+                                    }}
+                                    className="px-2 py-1 rounded-md border border-red-500/30 text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
+                                  >
+                                    {decidingApproval === approval.id
+                                      ? "Rejecting…"
+                                      : "Reject"}
+                                  </button>
+                                  <button
+                                    disabled={decidingApproval === approval.id}
+                                    onClick={async () => {
+                                      try {
+                                        setDecidingApproval(approval.id!);
+                                        await fetch(
+                                          `/api/approvals/${approval.id}/decision`,
+                                          {
+                                            method: "POST",
+                                            headers: {
+                                              "Content-Type":
+                                                "application/json",
+                                            },
+                                            body: JSON.stringify({
+                                              approved: true,
+                                            }),
+                                          }
+                                        );
+                                      } catch (e) {
+                                        console.error(
+                                          "[Approval approve error]",
+                                          e
+                                        );
+                                      } finally {
+                                        setDecidingApproval(null);
+                                      }
+                                    }}
+                                    className="px-2 py-1 rounded-md border border-emerald-500/30 text-[10px] text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                                  >
+                                    {decidingApproval === approval.id
+                                      ? "Approving…"
+                                      : "Approve"}
+                                  </button>
+                                </div>
+                              )}
+                              {approval.status &&
+                                approval.status !== "pending" && (
+                                  <p className="text-[10px] text-[#8b8b9a]">
+                                    Status:{" "}
+                                    <span className="font-semibold uppercase">
+                                      {approval.status}
+                                    </span>
+                                  </p>
+                                )}
+                            </div>
                           ) : (
-                            <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-24 scrollbar-thin">
-                              {typeof tool.output === "string"
-                                ? tool.output
-                                : JSON.stringify(tool.output, null, 2)}
-                            </pre>
+                            <>
+                              <p
+                                className={`text-[10px] uppercase mb-1 ${
+                                  tool.errorText
+                                    ? "text-red-400"
+                                    : "text-[#6b6b7a]"
+                                }`}
+                              >
+                                {tool.errorText ? "Error" : "Output"}
+                              </p>
+                              {tool.errorText ? (
+                                <pre className="text-red-400 overflow-x-auto max-h-24 scrollbar-thin">
+                                  {tool.errorText}
+                                </pre>
+                              ) : (
+                                <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-24 scrollbar-thin">
+                                  {typeof tool.output === "string"
+                                    ? tool.output
+                                    : JSON.stringify(tool.output, null, 2)}
+                                </pre>
+                              )}
+                            </>
                           )}
                         </div>
                       )}
@@ -322,6 +469,8 @@ function ChatPageContent() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // ── Restore session from localStorage ──────────────────────────────────────
 
@@ -418,7 +567,15 @@ function ChatPageContent() {
           "Content-Type": "application/json",
           "x-stream": "true",
         },
-        body: JSON.stringify({ message: text.trim(), sessionId }),
+        body: JSON.stringify({
+          message: text.trim(),
+          sessionId,
+          attachments: attachments.map((a) => ({
+            mimeType: a.mimeType,
+            data: a.data,
+            name: a.name,
+          })),
+        }),
         signal: controller.signal,
       });
 
@@ -578,8 +735,9 @@ function ChatPageContent() {
       setIsLoading(false);
       setLiveTools([]);
       textareaRef.current?.focus();
+      setAttachments([]);
     }
-  }, [isLoading, messages, sessionId, persistMessages]);
+  }, [attachments, isLoading, messages, sessionId, persistMessages]);
 
   // ── Handle form submit ──────────────────────────────────────────────────────
 
@@ -607,6 +765,38 @@ function ChatPageContent() {
     setInput(e.target.value);
     e.target.style.height = "auto";
     e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string | null;
+        if (!result) return;
+        const [, base64] = result.split(",", 2);
+        if (!base64) return;
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: nanoid(),
+            name: file.name,
+            mimeType: file.type || "application/octet-stream",
+            data: base64,
+          },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // Reset input so the same file can be selected again
+    e.target.value = "";
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
   // ── Stop generation ─────────────────────────────────────────────────────────
@@ -727,6 +917,28 @@ function ChatPageContent() {
       <div className="shrink-0 bg-gradient-to-t from-[#0a0a0b] via-[#0a0a0b] to-transparent pt-4 sm:pt-6 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe">
         <div className="max-w-4xl mx-auto">
           <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
+            {/* Attachments preview */}
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1">
+                {attachments.map((a) => (
+                  <span
+                    key={a.id}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#111113] border border-[#1e1e22] text-[10px] text-[#e8e8ea]"
+                  >
+                    <PaperclipIcon className="size-3 text-[#6b6b7a]" />
+                    <span className="max-w-[140px] truncate">{a.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveAttachment(a.id)}
+                      className="text-[#6b6b7a] hover:text-[#e8e8ea]"
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
             <div className="relative rounded-2xl border border-[#1e1e22] bg-[#111113]/90 backdrop-blur-xl shadow-2xl focus-within:border-[#00e5cc]/50 focus-within:ring-1 focus-within:ring-[#00e5cc]/20 transition-all">
               <textarea
                 ref={textareaRef}
@@ -736,20 +948,38 @@ function ChatPageContent() {
                 placeholder="Message VEGA..."
                 disabled={isLoading}
                 rows={1}
-                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-12 sm:pr-16 text-[13px] sm:text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
+                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-20 sm:pr-24 text-[13px] sm:text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
               />
-              <button
-                type={isLoading ? "button" : "submit"}
-                onClick={isLoading ? stopGeneration : undefined}
-                disabled={!isLoading && !input.trim()}
-                className="absolute right-1.5 bottom-1.5 sm:right-2 sm:bottom-2 size-8 sm:size-9 flex items-center justify-center rounded-xl bg-[#00e5cc] hover:bg-[#00c4b0] disabled:bg-[#1e1e22] disabled:text-[#6b6b7a] text-[#0a0a0b] transition-all"
-              >
-                {isLoading ? (
-                  <span className="size-3 sm:size-3.5 rounded-sm bg-current" /> // stop icon
-                ) : (
-                  <ArrowUpIcon className="size-4 sm:size-5" />
-                )}
-              </button>
+              <div className="absolute right-1.5 bottom-1.5 sm:right-2 sm:bottom-2 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl border border-[#1e1e22] bg-[#0a0a0b] text-[#6b6b7a] hover:text-[#e8e8ea] hover:bg-[#1e1e22] transition-all"
+                  title="Attach files"
+                >
+                  <PlusIcon className="size-4" />
+                </button>
+                <button
+                  type={isLoading ? "button" : "submit"}
+                  onClick={isLoading ? stopGeneration : undefined}
+                  disabled={!isLoading && !input.trim() && attachments.length === 0}
+                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl bg-[#00e5cc] hover:bg-[#00c4b0] disabled:bg-[#1e1e22] disabled:text-[#6b6b7a] text-[#0a0a0b] transition-all"
+                >
+                  {isLoading ? (
+                    <span className="size-3 sm:size-3.5 rounded-sm bg-current" />
+                  ) : (
+                    <ArrowUpIcon className="size-4 sm:size-5" />
+                  )}
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleFileChange}
+                accept="image/*,application/pdf"
+              />
             </div>
 
             {/* Footer status */}

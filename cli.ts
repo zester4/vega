@@ -9,6 +9,8 @@
  */
 import * as readline from "readline";
 import * as crypto   from "crypto";
+import * as fs       from "fs";
+import * as path     from "path";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const args    = process.argv.slice(2);
@@ -18,6 +20,8 @@ const getArg  = (flag: string, fallback: string) => {
 };
 const WORKER_URL = getArg("--url",     "http://127.0.0.1:8787");
 const SESSION_ID = getArg("--session", `cli-${crypto.randomBytes(4).toString("hex")}`);
+const FILE_PATH  = getArg("--file",    "");
+const DIR_PATH   = getArg("--dir",     "");
 
 // ─── Terminal colors ──────────────────────────────────────────────────────────
 const C = {
@@ -229,10 +233,48 @@ function startSpinner(): () => void {
 
 // ─── API call ─────────────────────────────────────────────────────────────────
 async function sendMessage(message: string, sessionId: string): Promise<string> {
+  const attachments: { mimeType: string; data: string; name: string }[] = [];
+
+  const addFileAttachment = (fullPath: string) => {
+    try {
+      const stat = fs.statSync(fullPath);
+      if (!stat.isFile()) return;
+      const ext = path.extname(fullPath).toLowerCase();
+      let mimeType = "application/octet-stream";
+      if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) {
+        mimeType = `image/${ext === ".jpg" ? "jpeg" : ext.slice(1)}`;
+      } else if (ext === ".pdf") {
+        mimeType = "application/pdf";
+      }
+      const buf = fs.readFileSync(fullPath);
+      const data = buf.toString("base64");
+      attachments.push({
+        mimeType,
+        data,
+        name: path.basename(fullPath),
+      });
+    } catch {
+      // ignore file errors
+    }
+  };
+
+  if (FILE_PATH) {
+    addFileAttachment(FILE_PATH);
+  }
+  if (DIR_PATH) {
+    try {
+      const entries = fs.readdirSync(DIR_PATH);
+      for (const entry of entries.slice(0, 5)) {
+        addFileAttachment(path.join(DIR_PATH, entry));
+      }
+    } catch {
+      // ignore
+    }
+  }
   const res = await fetch(`${WORKER_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, sessionId }),
+    body: JSON.stringify({ message, sessionId, attachments }),
   });
 
   const data = await res.json() as Record<string, unknown>;

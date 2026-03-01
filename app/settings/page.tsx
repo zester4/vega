@@ -154,6 +154,31 @@ export default function SettingsPage() {
         {/* ── Danger Zone ──────────────────────────────────────────────────────── */}
         <DangerZone />
 
+        {/* ── Debug: Force Disconnect ──────────────────────────────────────────── */}
+        <motion.section
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className="space-y-3 mt-8 pt-8 border-t border-[#1e1e22]"
+        >
+          <p className="text-xs text-[#4a4a58]">Debug: Force clear Telegram config</p>
+          <button
+            onClick={async () => {
+              if (!confirm("Force clear ALL Telegram configuration from Redis? This will disconnect any active bot.")) return;
+              try {
+                await api("DELETE", "/telegram/disconnect");
+                alert("✓ Configuration cleared. The bot should now be disconnected.");
+                window.location.reload();
+              } catch (e) {
+                alert(`✗ Error: ${String(e)}\n\n(If proxy failed, check your WORKER_URL env var)`);
+              }
+            }}
+            className="px-3 py-1.5 rounded-lg bg-red-600/10 border border-red-600/30 text-red-500 text-xs font-medium hover:bg-red-600/20 transition-all active:scale-95"
+          >
+            Clear Configuration & Disconnect
+          </button>
+        </motion.section>
+
       </div>
     </div>
   );
@@ -206,9 +231,11 @@ function TelegramSection({
     setError(null);
     try {
       await api("DELETE", "/telegram/disconnect");
+      setSuccess("Bot disconnected successfully.");
+      setToken(""); // Clear token input if it was filled
       onRefresh();
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      setError(`Failed to disconnect: ${String(e instanceof Error ? e.message : e)}`);
     } finally {
       setDisconnecting(false);
     }

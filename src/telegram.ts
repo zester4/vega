@@ -248,6 +248,61 @@ export class TelegramBot {
     }> {
         return this.call("getWebhookInfo");
     }
+
+    async getFile(fileId: string): Promise<{
+        file_id: string;
+        file_unique_id: string;
+        file_size?: number;
+        file_path: string;
+    }> {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return this.call<any>("getFile", { file_id: fileId });
+    }
+
+    async downloadFile(filePath: string): Promise<Uint8Array> {
+        const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+        if (!res.ok) throw new Error(`File download failed: ${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+    }
+
+    async sendVoice(
+        chatId: number | string,
+        audioBytes: Uint8Array,
+        opts: { reply_to_message_id?: number; caption?: string } = {}
+    ): Promise<TelegramMessage> {
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        form.append("voice", new Blob([audioBytes] as any, { type: "audio/mpeg" }), "voice.mp3");
+        if (opts.reply_to_message_id) form.append("reply_to_message_id", String(opts.reply_to_message_id));
+        if (opts.caption) {
+            form.append("caption", opts.caption.slice(0, 1024));
+            form.append("parse_mode", "HTML");
+        }
+        const res = await fetch(`${this.base}/sendVoice`, { method: "POST", body: form });
+        const data = await res.json() as { ok: boolean; result?: TelegramMessage; description?: string };
+        if (!data.ok) throw new Error(`sendVoice failed: ${data.description}`);
+        return data.result!;
+    }
+
+    async sendPhoto(
+        chatId: number | string,
+        imageBytes: Uint8Array,
+        caption?: string
+    ): Promise<TelegramMessage> {
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        form.append("photo", new Blob([imageBytes] as any, { type: "image/png" }), "image.png");
+        if (caption) {
+            form.append("caption", caption.slice(0, 1024));
+            form.append("parse_mode", "HTML");
+        }
+        const res = await fetch(`${this.base}/sendPhoto`, { method: "POST", body: form });
+        const data = await res.json() as { ok: boolean; result?: TelegramMessage; description?: string };
+        if (!data.ok) throw new Error(`sendPhoto failed: ${data.description}`);
+        return data.result!;
+    }
 }
 
 // ─── Main Update Handler ──────────────────────────────────────────────────────
@@ -325,22 +380,28 @@ async function handleCommand(
 
 I'm an autonomous AI agent that can:
 
-🔍 <b>Search & Browse</b> — Real-time web search, full browser for JS sites
-🧠 <b>Remember</b> — Persistent memory across all our conversations
+🔍 <b>Search & Browse</b> — Web search, headless browser, Firecrawl deep scraping
+🧠 <b>Remember Forever</b> — Persistent memory + vector semantic recall across all sessions
 💻 <b>Run Code</b> — Execute Python, analyze data, generate charts
-🤖 <b>Spawn Sub-agents</b> — Create parallel AI workers for complex tasks
-📁 <b>Store Files</b> — Save reports, data, and documents
-⚙️ <b>Build Tools</b> — Create new capabilities on demand
-🔔 <b>Schedule Jobs</b> — Set up recurring automated tasks
-
-Just send me any message and I'll get to work.
+🤖 <b>Spawn Sub-agents</b> — Parallel AI workers for complex tasks
+📁 <b>Manage Files</b> — R2 cloud storage for reports and documents
+⚙️ <b>Build New Tools</b> — Self-extends capabilities on demand
+🔔 <b>Schedule Jobs</b> — Recurring cron jobs with proactive alerts
+🎨 <b>Generate Images</b> — Gemini Nano Banana 2 image generation
+📊 <b>Market Intelligence</b> — Live prices, portfolio tracking, price alerts
+🎙️ <b>Voice Mode</b> — Send voice, get voice replies (ElevenLabs)
+🌍 <b>25+ Languages</b> — Auto-detects, translates, responds in your language
+🎯 <b>Goal Tracking</b> — Long-term goal pursuit across sessions
 
 <b>Commands:</b>
-/help — Show this message
+/help — Full command list
 /reset — Clear conversation history
-/status — My current status
-/tasks — View running background tasks
-/memory — See what I remember about you
+/status — Agent status & heartbeat
+/tasks — Background tasks & cron jobs
+/memory — Stored memories
+/goals — Active goal tracker
+/voice_on — Enable voice replies
+/voice_off — Disable voice replies
       `.trim(), { parse_mode: "HTML" });
             break;
         }
@@ -353,15 +414,73 @@ Just send me any message and I'll get to work.
 /help — This help message
 /reset — Clear this conversation's history
 /status — Check agent status and uptime
-/tasks — List running background tasks (sub-agents & workflows)
-/memory — See stored memories for this chat
+/tasks — Background tasks (sub-agents & workflows)
+/memory — Stored memories for this chat
+/goals — Active goal tracker with progress bars
+/voice_on — Enable voice replies (ElevenLabs TTS)
+/voice_off — Disable voice replies
 
 <b>Tips:</b>
-• For long research tasks, I'll kick off a background workflow and notify you when done
-• I remember our conversations — reference previous context freely
-• I can handle images and documents you send me
-• Say "create a tool that..." to extend my capabilities on the fly
+• Send a voice message — I'll transcribe and respond
+• Send a photo — I'll analyze it with Gemini Vision
+• "Generate an image of..." — Nano Banana 2 image gen
+• "What's the price of BTC?" — live Yahoo Finance data
+• "Track goal: ..." — I'll remember and pursue it
+• "Translate this to Spanish: ..." — 32+ languages
+• "Set a price alert for AAPL above $200" — proactive push
+• "Create a tool that..." — extend my capabilities on the fly
       `.trim(), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/goals": {
+            const { executeTool } = await import("./tools/builtins");
+            const result = await executeTool("manage_goals", { action: "list_goals" }, env) as {
+                goals?: Array<{ id: string; title: string; progress: number; priority: string; status: string; nextAction?: string }>;
+                count?: number;
+                activeCount?: number;
+            };
+
+            if (!result.goals?.length) {
+                await bot.sendMessage(chatId,
+                    "\ud83c\udfaf <b>No goals set yet.</b>\n\nTell me your goals and I'll track and pursue them automatically!",
+                    { parse_mode: "HTML" }
+                );
+                break;
+            }
+
+            let goalsText = `<b>\ud83c\udfaf Active Goals</b> (${result.activeCount ?? 0} active)\n\n`;
+            for (const goal of result.goals.slice(0, 8)) {
+                const filled = Math.round(goal.progress / 10);
+                const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
+                const pIcon = goal.priority === "critical" ? "\ud83d\udd34" : goal.priority === "high" ? "\ud83d\udfe0" : goal.priority === "medium" ? "\ud83d\udfe1" : "\ud83d�";
+                goalsText += `${pIcon} <b>${escapeHtml(goal.title)}</b>\n`;
+                goalsText += `[${bar}] ${goal.progress}%\n`;
+                if (goal.nextAction) goalsText += `\ud83d\udccc <i>${escapeHtml(goal.nextAction.slice(0, 80))}</i>\n`;
+                goalsText += "\n";
+            }
+            if ((result.goals.length ?? 0) > 8) goalsText += `<i>\u2026and ${result.goals.length - 8} more</i>`;
+
+            await bot.sendMessage(chatId, goalsText.trim(), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/voice_on": {
+            const { getRedis } = await import("./memory");
+            const redis = getRedis(env);
+            await redis.set(`tg:voice:${chatId}`, "1", { ex: 60 * 60 * 24 * 30 });
+            await bot.sendMessage(chatId,
+                "🎙️ <b>Voice replies enabled!</b>\nI'll respond with voice messages now. Send me a voice message to try it!\n\nSend /voice_off to disable.",
+                { parse_mode: "HTML" }
+            );
+            break;
+        }
+
+        case "/voice_off": {
+            const { getRedis } = await import("./memory");
+            const redis = getRedis(env);
+            await redis.del(`tg:voice:${chatId}`);
+            await bot.sendMessage(chatId, "\ud83d\udd07 <b>Voice replies disabled.</b> Text mode restored.", { parse_mode: "HTML" });
             break;
         }
 
@@ -500,8 +619,6 @@ async function processMessage(
     config: TelegramBotConfig
 ): Promise<void> {
     const chatId = msg.chat.id;
-
-    // Get or create a stable VEGA session for this Telegram chat
     const { getRedis } = await import("./memory");
     const redis = getRedis(env);
     const sessionKey = `tg:session:${chatId}`;
@@ -512,51 +629,104 @@ async function processMessage(
         await redis.set(sessionKey, sessionId);
     }
 
-    // Build the user message — include image description if photo sent
     let fullMessage = userText;
-    if (msg.photo && msg.photo.length > 0) {
-        fullMessage = `[User sent a photo${userText ? `: ${userText}` : ". Describe what you can infer from this context."}]`;
-    } else if (msg.document) {
-        fullMessage = `[User sent a document: ${msg.document.file_name ?? "unknown file"}${userText ? ` — ${userText}` : ""}]`;
-    } else if (msg.voice) {
-        fullMessage = `[User sent a voice message${userText ? ` — ${userText}` : ". Respond helpfully."}]`;
+    let transcribedVoice = false;
+
+    // ── VOICE MESSAGE → Transcribe with ElevenLabs STT ──────────────────────────
+    if (msg.voice?.file_id) {
+        try {
+            await bot.sendChatAction(chatId, "typing");
+            const { transcribeTelegramVoice } = await import("./tools/voice");
+            const transcript = await transcribeTelegramVoice(msg.voice.file_id, config.token, env);
+
+            if (transcript) {
+                fullMessage = transcript;
+                transcribedVoice = true;
+                console.log(`[Telegram Voice] Transcribed: "${transcript.slice(0, 100)}"`);
+            } else {
+                fullMessage = "[User sent a voice message — transcription unavailable. Configure ELEVENLABS_API_KEY.]";
+            }
+        } catch (voiceErr) {
+            console.error("[Telegram Voice] STT failed:", voiceErr);
+            fullMessage = "[User sent a voice message — transcription failed.]";
+        }
     }
 
-    // Send typing indicator
-    await bot.sendChatAction(chatId, "typing");
+    // ── PHOTO → Gemini Vision description ───────────────────────────────────────
+    if (msg.photo && msg.photo.length > 0) {
+        try {
+            // Download highest resolution photo
+            const photo = msg.photo[msg.photo.length - 1];
+            const file = await bot.getFile(photo.file_id);
+            const imageBytes = await bot.downloadFile(file.file_path);
+            const base64 = btoa(String.fromCharCode(...imageBytes));
+            const ext = file.file_path.split(".").pop() ?? "jpg";
+            const mimeType = ext === "png" ? "image/png" : "image/jpeg";
 
-    // Send a live "working" message that we'll update as tools run
+            const { analyzeImage } = await import("./gemini");
+            const description = await analyzeImage(
+                env.GEMINI_API_KEY,
+                base64,
+                mimeType,
+                userText
+                    ? `The user sent this image with the message: "${userText}". Describe the image in detail and address their message.`
+                    : "Describe this image in detail. Note all visible elements, text, objects, people, colors, and context."
+            );
+
+            fullMessage = userText
+                ? `[User sent a photo with caption: "${userText}"]\n\nVision Analysis:\n${description}`
+                : `[User sent a photo]\n\nVision Analysis:\n${description}`;
+        } catch (visionErr) {
+            console.error("[Telegram Vision] Failed:", visionErr);
+            fullMessage = `[User sent a photo${userText ? `: ${userText}` : ". Describe what you can infer."}]`;
+        }
+    }
+
+    // ── DOCUMENT handling ────────────────────────────────────────────────────────
+    if (msg.document) {
+        fullMessage = `[User sent document: ${msg.document.file_name ?? "unknown"}${userText ? ` — ${userText}` : ""}]`;
+    }
+
+    if (!fullMessage.trim()) return;
+
+    // ── Auto-detect language for multi-language support ──────────────────────────
+    let detectedLang = "en";
+    if (fullMessage.length > 10 && !transcribedVoice) {
+        try {
+            const { detectUserLanguage } = await import("./tools/translate");
+            detectedLang = await detectUserLanguage(fullMessage, env);
+        } catch { /* non-fatal */ }
+    }
+
+    // ── Send typing indicator + progress message ─────────────────────────────────
+    await bot.sendChatAction(chatId, "typing");
     let progressMsg: TelegramMessage | null = null;
     const activeTools: string[] = [];
     let lastEditTs = 0;
 
     try {
         progressMsg = await bot.sendMessage(chatId,
-            "⚙️ <b>Processing…</b>",
+            transcribedVoice
+                ? `🎙️ <b>Heard:</b> <i>"${escapeHtml(fullMessage.slice(0, 150))}..."</i>\n\n⚙️ <b>Processing…</b>`
+                : "⚙️ <b>Processing…</b>",
             { parse_mode: "HTML" }
         );
-    } catch {
-        // Non-fatal if this fails
-    }
+    } catch { /* non-fatal */ }
 
     const updateProgressMessage = async (toolName: string, status: "start" | "done" | "error") => {
         if (!progressMsg) return;
-
         const now = Date.now();
-        // Throttle edits to max 1 per second (Telegram rate limit: 30 edits/min)
         if (now - lastEditTs < 1000) return;
         lastEditTs = now;
 
-        if (status === "start") {
-            activeTools.push(toolName);
-        } else {
+        if (status === "start") activeTools.push(toolName);
+        else {
             const idx = activeTools.lastIndexOf(toolName);
             if (idx !== -1) activeTools.splice(idx, 1);
         }
 
         const toolIcon = getTelegramToolIcon(toolName);
         const currentTool = activeTools[activeTools.length - 1];
-
         const progressText = currentTool
             ? `⚙️ <b>Working…</b>\n${toolIcon} <code>${currentTool}</code> ${status === "error" ? "❌" : "running"}`
             : "⚙️ <b>Finalizing…</b>";
@@ -566,20 +736,17 @@ async function processMessage(
         } catch { /* ignore */ }
     };
 
-    // Run the agent
     const { runAgent } = await import("./agent");
 
     let reply: string;
     try {
         reply = await runAgent(env, sessionId, fullMessage, undefined, async (event) => {
-            if (event.type === "tool-start") {
-                await updateProgressMessage(event.data.name, "start");
-            } else if (event.type === "tool-result" || event.type === "tool-error") {
+            if (event.type === "tool-start") await updateProgressMessage(event.data.name, "start");
+            else if (event.type === "tool-result" || event.type === "tool-error") {
                 await updateProgressMessage(event.data.name, event.type === "tool-error" ? "error" : "done");
             }
         });
     } catch (err) {
-        // Delete progress message
         if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
         await bot.sendMessage(chatId,
             `❌ <b>Error:</b> ${escapeHtml(String(err))}`,
@@ -588,20 +755,61 @@ async function processMessage(
         return;
     }
 
-    // Delete the "working" progress message
-    if (progressMsg) {
-        await bot.deleteMessage(chatId, progressMsg.message_id);
+    // Delete progress message
+    if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
+
+    // ── Check voice mode preference ──────────────────────────────────────────────
+    const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
+
+    if (voiceEnabled && reply.length > 0 && reply.length <= 2000) {
+        // Send voice reply using ElevenLabs TTS
+        try {
+            await bot.sendChatAction(chatId, "upload_document");
+            const { generateSpeechBytes } = await import("./tools/voice");
+            const audioBytes = await generateSpeechBytes(reply, env);
+
+            if (audioBytes) {
+                // Send text first (for accessibility / fallback)
+                const formatted = markdownToHtml(reply);
+                await bot.sendMessage(chatId, formatted, {
+                    parse_mode: "HTML",
+                    reply_to_message_id: msg.message_id,
+                    disable_web_page_preview: true,
+                });
+                // Then send voice
+                await bot.sendVoice(chatId, audioBytes, {
+                    reply_to_message_id: msg.message_id,
+                    caption: "🎙️ Voice reply",
+                });
+            } else {
+                // Fallback to text if TTS fails
+                const formatted = markdownToHtml(reply);
+                await bot.sendMessage(chatId, formatted, {
+                    parse_mode: "HTML",
+                    reply_to_message_id: msg.message_id,
+                    disable_web_page_preview: true,
+                });
+            }
+        } catch (ttsErr) {
+            console.error("[Telegram TTS] Failed:", ttsErr);
+            const formatted = markdownToHtml(reply);
+            await bot.sendMessage(chatId, formatted, {
+                parse_mode: "HTML",
+                reply_to_message_id: msg.message_id,
+                disable_web_page_preview: true,
+            });
+        }
+    } else {
+        // Regular text reply
+        const formatted = markdownToHtml(reply);
+        await bot.sendMessage(chatId, formatted, {
+            parse_mode: "HTML",
+            reply_to_message_id: msg.message_id,
+            disable_web_page_preview: true,
+        });
     }
 
-    // Format and send the final response
-    const formatted = markdownToHtml(reply);
-    await bot.sendMessage(chatId, formatted, {
-        parse_mode: "HTML",
-        reply_to_message_id: msg.message_id,
-        disable_web_page_preview: true,
-    });
-
-    // Log to Redis for the frontend activity feed
+    // ── Activity log ─────────────────────────────────────────────────────────────
     try {
         await redis.lpush("tg:activity", JSON.stringify({
             chatId,
@@ -609,9 +817,11 @@ async function processMessage(
             firstName: msg.from?.first_name,
             messagePreview: fullMessage.slice(0, 100),
             replyPreview: reply.slice(0, 100),
+            wasVoice: transcribedVoice,
+            detectedLang,
             ts: Date.now(),
         }));
-        await redis.ltrim("tg:activity", 0, 49); // keep last 50
+        await redis.ltrim("tg:activity", 0, 49);
     } catch { /* non-fatal */ }
 }
 
@@ -709,12 +919,19 @@ export async function disconnectTelegramBot(env: Env): Promise<void> {
         try {
             const config: TelegramBotConfig = JSON.parse(raw);
             const bot = new TelegramBot(config.token);
-            await bot.deleteWebhook();
-        } catch { /* ignore if token is invalid */ }
+            // We still want to clear the Redis config even if deleteWebhook fails
+            await bot.deleteWebhook().catch((err) => {
+                console.error("[Telegram Disconnect] Failed to delete webhook from Telegram:", err);
+            });
+        } catch (err) {
+            console.error("[Telegram Disconnect] Failed to parse config from Redis:", err);
+        }
     }
 
+    // Always clear these keys if they exist
     await redis.del("tg:config");
     await redis.del("tg:enabled");
+    console.log("[Telegram Disconnect] Config cleared from Redis.");
 }
 
 /**
@@ -744,19 +961,47 @@ export async function getTelegramConfig(env: Env): Promise<TelegramBotConfig | n
         const secret = await getTelegramSecret(token);
         const bot = new TelegramBot(token);
 
+        // Fallback webhook URL: use UPSTASH_WORKFLOW_URL (public worker URL)
+        // Using indexed access to avoid TS errors if WORKER_URL is not in Env type
+        const publicUrl = env.UPSTASH_WORKFLOW_URL || (env as any).WORKER_URL || "";
+        const webhookUrl = publicUrl ? `${publicUrl.replace(/\/$/, "")}/telegram/webhook` : "";
+
         try {
-            // We need the bot username for command parsing
+            // Validate the token and get bot info
             const me = await bot.getMe();
             const config: TelegramBotConfig = {
                 token,
                 botId: me.id,
                 username: me.username || "bot",
                 firstName: me.first_name,
-                webhookUrl: `${env.UPSTASH_WORKFLOW_URL}/telegram/webhook`,
+                webhookUrl,
                 secret,
                 connectedAt: new Date().toISOString(),
             };
-            console.log(`[Telegram Config] Using fallback environment config for @${config.username}`);
+
+            // CRITICAL: register the webhook with Telegram so it knows where to POST updates.
+            // Without this call, Telegram has no idea where to send messages.
+            if (webhookUrl) {
+                try {
+                    await bot.setWebhook(webhookUrl, secret);
+                    console.log(`[Telegram Config] Webhook auto-registered at: ${webhookUrl}`);
+                } catch (whErr) {
+                    console.error("[Telegram Config] Failed to auto-register webhook:", whErr);
+                }
+
+                // Save config to Redis so the next request doesn't have to re-register
+                try {
+                    await redis.set("tg:config", JSON.stringify(config));
+                    await redis.set("tg:enabled", "1");
+                    console.log(`[Telegram Config] Config saved to Redis for @${config.username}`);
+                } catch (redisErr) {
+                    console.error("[Telegram Config] Failed to persist config to Redis:", redisErr);
+                }
+            } else {
+                console.warn("[Telegram Config] No public URL configured — webhook NOT registered. Set UPSTASH_WORKFLOW_URL to your ngrok/public URL.");
+            }
+
+            console.log(`[Telegram Config] Fallback env config ready for @${config.username}. Webhook: ${config.webhookUrl}`);
             return config;
         } catch (err) {
             console.error("[Telegram Config] Fallback token is invalid or API error:", err);
@@ -898,27 +1143,60 @@ function formatRelativeTime(ts: number): string {
  */
 function getTelegramToolIcon(toolName: string): string {
     const icons: Record<string, string> = {
+        // Search & Browse
         web_search: "🔍",
         browse_web: "🌐",
         fetch_url: "📄",
+        firecrawl: "🕷️",
+        // Memory
         store_memory: "💾",
         recall_memory: "🧠",
         list_memories: "📋",
+        delete_memory: "🗑️",
         semantic_store: "🔮",
         semantic_recall: "🔮",
+        share_memory: "🤝",
+        read_agent_memory: "🔍",
+        ingest_knowledge_base: "📚",
+        // Files
+        write_file: "📁",
+        read_file: "📂",
+        list_files: "🗂️",
+        delete_file: "🗑️",
+        // Code
         run_code: "💻",
         calculate: "🧮",
+        // Image & Voice
+        generate_image: "🎨",
+        text_to_speech: "🎤",
+        speech_to_text: "👂",
+        // Market
+        market_data: "📈",
+        // Language
+        translate: "🌍",
+        // Goals
+        manage_goals: "🎯",
+        proactive_notify: "🔔",
+        // Agent Infrastructure
+        trigger_workflow: "⚙️",
+        get_task_status: "📡",
+        spawn_agent: "🤖",
+        get_agent_result: "📊",
+        list_agents: "📋",
+        cancel_agent: "🛑",
+        create_tool: "🔧",
+        benchmark_tool: "⚡",
+        // Scheduling
+        schedule_cron: "⏰",
+        list_crons: "📅",
+        update_cron: "✏️",
+        delete_cron: "🗑️",
+        get_datetime: "🕐",
+        human_approval_gate: "🚦",
+        // Integrations
         github: "🐙",
         send_email: "📧",
         send_sms: "📱",
-        trigger_workflow: "⚙️",
-        spawn_agent: "🤖",
-        get_agent_result: "📊",
-        create_tool: "🔧",
-        write_file: "📁",
-        read_file: "📂",
-        get_datetime: "🕐",
-        schedule_cron: "⏰",
     };
     return icons[toolName] ?? "🛠️";
 }

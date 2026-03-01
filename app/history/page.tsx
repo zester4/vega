@@ -113,6 +113,7 @@ export default function HistoryPage() {
               <RefreshCwIcon className={`size-4 ${loading ? "animate-spin text-[#00e5cc]" : "text-[#6b6b7a]"}`} />
               Refresh
             </button>
+          </div>
         </motion.div>
 
         {/* Search */}

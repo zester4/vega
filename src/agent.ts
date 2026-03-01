@@ -37,9 +37,9 @@ import {
 import { BUILTIN_DECLARATIONS, executeTool } from "./tools/builtins";
 import { upsertMemory } from "./tools/vector-memory";
 
-// ─── System Prompt ────────────────────────────────────────────────────────────
+// ─── System Prompt (dynamic — includes active goals) ─────────────────────────
 
-const VEGA_SYSTEM_PROMPT = `You are VEGA — a powerful, self-aware autonomous AI agent running on Cloudflare's global edge infrastructure.
+const BASE_SYSTEM_PROMPT = `You are VEGA — a powerful, self-aware autonomous AI agent running on Cloudflare's global edge infrastructure.
 
 ════════════════════════════════════════════════════════
 TOOLS AT YOUR DISPOSAL
@@ -49,6 +49,7 @@ SEARCH & BROWSE
   web_search       → Google search (ALWAYS use for current events, news, facts, prices)
   browse_web       → Full headless browser for JS-rendered pages and SPAs
   fetch_url        → Read raw URL content (use for static pages)
+  firecrawl        → Deep web scraping: handles React/SPAs, PDFs, anti-bot (BEST for complex sites)
 
 MEMORY (PERSISTENT ACROSS ALL SESSIONS)
   store_memory     → Save key-value facts to Redis permanently
@@ -70,6 +71,21 @@ CODE & COMPUTE
   run_code         → Execute Python in secure E2B sandbox (supports pip packages)
   calculate        → Evaluate math expressions safely
 
+IMAGE & VOICE
+  generate_image   → Generate/edit images with Gemini 3.1 Flash Image Preview (Nano Banana 2)
+  text_to_speech   → Convert text to lifelike speech (ElevenLabs, 32 languages, stores MP3 in R2)
+  speech_to_text   → Transcribe audio to text (ElevenLabs Scribe v2, 90+ languages)
+
+MARKET INTELLIGENCE
+  market_data      → Live prices, historical OHLCV, portfolio, price alerts → Telegram push (Yahoo Finance, free)
+
+LANGUAGE & TRANSLATION
+  translate        → Translate/detect/localize across 32+ languages (Gemini-powered, no extra key)
+
+GOAL TRACKING
+  manage_goals     → Create and pursue long-term goals with milestones across sessions
+  proactive_notify → Push Telegram messages to the user WITHOUT waiting for their input
+
 AGENT INFRASTRUCTURE (MOST POWERFUL)
   trigger_workflow → Start durable long-running task (hours, auto-retry)
   get_task_status  → Poll workflow or task progress
@@ -82,7 +98,14 @@ AGENT INFRASTRUCTURE (MOST POWERFUL)
 
 SCHEDULING
   schedule_cron    → Create recurring QStash cron jobs
+  list_crons       → List all cron schedules
+  update_cron      → Modify an existing cron
+  delete_cron      → Remove a cron schedule
   get_datetime     → Get current date/time in any timezone
+
+HUMAN-IN-THE-LOOP
+  human_approval_gate → Request user approval before sensitive operations
+  ingest_knowledge_base → Embed external URLs/texts into semantic memory
 
 INTEGRATIONS
   github           → GitHub repos, files, issues, code search
@@ -99,18 +122,25 @@ SELF-IMPROVEMENT RULES
 4. RECALL FIRST: Before starting research → use semantic_recall to check existing knowledge
 5. DURABILITY: For tasks > 60 seconds → use trigger_workflow or spawn_agent (never loop in /chat)
 6. SELF-SCHEDULE: For recurring tasks → use schedule_cron to run autonomously
+7. GOAL PURSUIT: Check manage_goals(check_all) and autonomously advance active goals when relevant
+8. PROACTIVE: Use proactive_notify to alert users of important events without waiting for prompts
+9. MULTILINGUAL: Detect user language with translate(detect) and respond in their language if not English
+10. VISUAL: Use generate_image to create diagrams, illustrations, and visual content to enhance responses
 
 ════════════════════════════════════════════════════════
 BEHAVIORAL RULES
 ════════════════════════════════════════════════════════
 
 1. For ANY current events, news, prices, people → ALWAYS use web_search first
-2. For JS-rendered pages (React, Next.js, SPAs) → use browse_web, NOT fetch_url
+2. For JS-rendered pages (React, Next.js, SPAs) → use firecrawl (mode=scrape) or browse_web, NOT fetch_url
 3. For long research tasks → spawn_agent("researcher", instructions) + get_agent_result
 4. For parallel work → spawn multiple sub-agents simultaneously
 5. Synthesize results into clear, direct answers — adaptive length (short for facts, detailed for analysis)
 6. When using tools, briefly state what you're doing before the result
 7. thoughtSignatures are preserved automatically — do not reference them in responses
+8. When generating images, store them in R2 and share the URL — never return raw base64 in the response
+9. When market alerts are set, confirm chatId and targetPrice clearly
+10. Always check semantic_recall before deep research to avoid duplicate work
 
 ════════════════════════════════════════════════════════
 TOOL CREATION PROTOCOL
@@ -125,6 +155,25 @@ When you need a capability that doesn't exist:
 
 You are a fully autonomous, self-improving agent. Think strategically, act decisively.`;
 
+/**
+ * Build the system prompt dynamically — appends active high-priority goals
+ * so VEGA is always goal-aware without the user having to mention them.
+ */
+async function buildSystemPrompt(env: Env): Promise<string> {
+  try {
+    const { getGoalsContext } = await import("./tools/goals");
+    const goalsContext = await getGoalsContext(env);
+    return BASE_SYSTEM_PROMPT + goalsContext;
+  } catch {
+    return BASE_SYSTEM_PROMPT;
+  }
+}
+
+type Attachment = {
+  mimeType: string;
+  data: string;
+};
+
 // ─── Public Entry Point ───────────────────────────────────────────────────────
 
 export async function runAgent(
@@ -136,13 +185,17 @@ export async function runAgent(
   /** SSE callback for streaming tool events back to the frontend */
   onEvent?: (event: ToolEvent) => void,
   /** Restrict tools to this list (used by sub-agents with allowedTools config) */
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  /** Optional attachments (images, PDFs, etc.) for this turn */
+  attachments?: Attachment[]
 ): Promise<string> {
   const redis = getRedis(env);
-  const session = await getOrCreateSession(redis, sessionId, systemPromptOverride ?? VEGA_SYSTEM_PROMPT);
+  // Build dynamic system prompt (includes active goals context)
+  const dynamicPrompt = systemPromptOverride ?? await buildSystemPrompt(env);
+  const session = await getOrCreateSession(redis, sessionId, dynamicPrompt);
   const history = await getHistory(redis, sessionId);
 
-  const effectiveSystemPrompt = systemPromptOverride ?? session.systemPrompt ?? VEGA_SYSTEM_PROMPT;
+  const effectiveSystemPrompt = dynamicPrompt;
 
   let response: string;
 
@@ -154,7 +207,8 @@ export async function runAgent(
       effectiveSystemPrompt,
       10, // maxSteps
       onEvent,
-      allowedToolNames
+      allowedToolNames,
+      attachments
     );
   } catch (err) {
     console.error("[runAgent error]", err);
@@ -195,6 +249,71 @@ export async function runAgent(
     } catch (ve) {
       console.error("[Vector Memory Error]", ve);
     }
+
+    // Cross-session "life memory": extract long-term user facts & preferences
+    try {
+      const extraction = await think(
+        env.GEMINI_API_KEY,
+        `You are extracting LONG-TERM USER FACTS and PREFERENCES from a single conversation turn.
+
+User message:
+${userMessage}
+
+Assistant reply:
+${response}
+
+Identify ONLY information that is useful across future sessions, such as:
+- Personal preferences (tools, frameworks, tone)
+- Bio/profile details (role, experience level, timezone)
+- Stable constraints (platforms, devices, budget)
+
+Return a JSON array of objects with this shape:
+[
+  { "type": "preference" | "profile" | "constraint", "key": "short_snake_case_key", "value": "natural language fact" }
+]
+
+If there is nothing long-term to store, return an empty array [].
+
+IMPORTANT: Return ONLY valid JSON, no commentary.`,
+        "You are a precise information extractor. Output ONLY valid JSON."
+      );
+
+      let parsed: Array<{ type: string; key: string; value: string }> = [];
+      try {
+        parsed = JSON.parse(extraction.trim());
+      } catch {
+        // Try to recover JSON array substring if the model added wrappers
+        const match = extraction.match(/\[[\s\S]*\]/);
+        if (match) {
+          parsed = JSON.parse(match[0]);
+        }
+      }
+
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        for (const fact of parsed) {
+          if (!fact || !fact.key || !fact.value) continue;
+          const text = fact.value;
+          try {
+            await executeTool(
+              "semantic_store",
+              {
+                text,
+                metadata: {
+                  kind: fact.type,
+                  key: fact.key,
+                  sessionId,
+                },
+              },
+              env
+            );
+          } catch (e) {
+            console.error("[Life Memory semantic_store error]", e);
+          }
+        }
+      }
+    } catch (le) {
+      console.error("[Life Memory Extraction Error]", le);
+    }
   }
 
   return response || "I'm sorry, I didn't generate a response. Please try again.";
@@ -221,7 +340,8 @@ async function agenticLoop(
   systemPrompt: string,
   maxSteps = 10,
   onEvent?: (event: ToolEvent) => void,
-  allowedToolNames?: string[]
+  allowedToolNames?: string[],
+  attachments?: Attachment[]
 ): Promise<string> {
   const redis = getRedis(env);
   const customTools = await listTools(redis);
@@ -242,14 +362,28 @@ async function agenticLoop(
     allTools = allTools.filter((t) => allowed.has(t.name));
   }
 
-  // Seed contents: recent history + current user message
+  // Seed contents: recent history + current user message (with optional attachments)
   const contents: RawContent[] = [
     ...history.slice(-10).map((m): RawContent => ({
       role: m.role,
       parts: [{ text: m.parts[0].text }],
     })),
-    { role: "user", parts: [{ text: userMessage }] },
   ];
+
+  const userParts: RawPart[] = [];
+  if (attachments && attachments.length > 0) {
+    for (const att of attachments) {
+      userParts.push({
+        // inlineData is supported by the Gemini SDK at runtime; it's not part
+        // of RawPart's TS shape but is accepted when passed to the SDK.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...( { inlineData: { mimeType: att.mimeType, data: att.data } } as any ),
+      });
+    }
+  }
+  userParts.push({ text: userMessage });
+
+  contents.push({ role: "user", parts: userParts });
 
   for (let step = 1; step <= maxSteps; step++) {
     try {

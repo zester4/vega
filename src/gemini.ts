@@ -11,7 +11,7 @@
  */
 import { GoogleGenAI, Type } from "@google/genai";
 
-export const MODEL = "gemini-3-flash-preview";
+export const MODEL = "gemini-2.5-flash";
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 let _ai: GoogleGenAI | null = null;

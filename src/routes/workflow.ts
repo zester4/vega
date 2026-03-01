@@ -130,7 +130,9 @@ async function handleSubAgent(
       // onEvent: sub-agents don't stream events back (fire-and-forget)
       undefined,
       // Tool filter: if allowedTools is set, only pass those declarations
-      agentConfig.allowedTools ?? undefined
+      agentConfig.allowedTools ?? undefined,
+      // Attachments are not used for background sub-agents today
+      undefined
     );
 
     return reply;
