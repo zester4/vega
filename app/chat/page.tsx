@@ -10,7 +10,7 @@
  *  - URL param ?session=ID to restore sessions
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { nanoid } from "nanoid";
 import { CopyIcon, RefreshCwIcon } from "lucide-react";
@@ -280,7 +280,7 @@ function ThinkingDot() {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-export default function ChatPage() {
+function ChatPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -747,5 +747,17 @@ export default function ChatPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex h-[100dvh] w-full items-center justify-center bg-[#0a0a0b]">
+        <div className="size-4 rounded-full bg-[#00e5cc] animate-ping" />
+      </div>
+    }>
+      <ChatPageContent />
+    </Suspense>
   );
 }
