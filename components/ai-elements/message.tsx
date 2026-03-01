@@ -1,3 +1,4 @@
+//components/ai-elements/message.tsx
 "use client";
 
 import type { UIMessage } from "ai";

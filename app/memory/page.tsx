@@ -1,7 +1,9 @@
+//app/memory/page.tsx
 "use client";
 
 import { useState, useEffect } from "react";
 import { Trash2Icon, RefreshCwIcon, DatabaseIcon } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 
 export interface Memory {
   id: string;
@@ -66,88 +68,113 @@ export default function MemoryPage() {
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin bg-[#0a0a0b]">
-      <div className="max-w-4xl mx-auto p-8">
+      <div className="max-w-4xl mx-auto p-4 sm:p-8">
         {/* Header */}
-        <div className="mb-8 flex items-center justify-between">
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-6 sm:mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        >
           <div>
-            <h1 className="text-2xl font-bold text-[#e8e8ea] mb-2">
+            <h1 className="text-xl sm:text-2xl font-bold text-[#e8e8ea] mb-1 sm:mb-2 flex items-center gap-2">
+              <DatabaseIcon className="size-5 sm:size-6 text-[#00e5cc]" />
               Knowledge Base
             </h1>
-            <p className="text-sm text-[#6b6b7a]">
+            <p className="text-xs sm:text-sm text-[#6b6b7a]">
               Manage persistent memories and facts stored by VEGA
             </p>
           </div>
           <button
             onClick={handleRefresh}
             disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 rounded-md bg-[#1e1e22] text-[#e8e8ea] hover:bg-[#2a2a2f] transition-colors disabled:opacity-50"
+            className="flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[#111113] border border-[#1e1e22] text-[#e8e8ea] hover:bg-[#1a1a1f] hover:border-[#3a3a44] transition-all disabled:opacity-50 text-sm w-full sm:w-auto shadow-sm"
           >
-            <RefreshCwIcon className={`size-4 ${loading ? "animate-spin" : ""}`} />
+            <RefreshCwIcon className={`size-4 ${loading ? "animate-spin text-[#00e5cc]" : "text-[#6b6b7a]"}`} />
             Refresh
           </button>
-        </div>
+        </motion.div>
 
         {/* Search */}
-        <div className="mb-6">
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search memories..."
-            className="w-full px-4 py-2 rounded-md border border-[#1e1e22] bg-[#111113] text-[#e8e8ea] placeholder-[#6b6b7a] focus:border-[#00e5cc] focus:outline-none"
-          />
-        </div>
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="mb-6"
+        >
+          <div className="relative">
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search memories..."
+              className="w-full px-4 py-2.5 rounded-lg border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:border-[#00e5cc]/50 focus:ring-1 focus:ring-[#00e5cc]/20 focus:outline-none transition-all text-sm"
+            />
+          </div>
+        </motion.div>
 
         {loading ? (
           <div className="text-center py-12">
-            <p className="text-[#6b6b7a]">Loading memories...</p>
+            <RefreshCwIcon className="size-6 text-[#00e5cc] animate-spin mx-auto mb-3" />
+            <p className="text-[#6b6b7a] text-sm">Loading memories...</p>
           </div>
         ) : filteredMemories.length === 0 ? (
-          <div className="border border-[#1e1e22] rounded-lg p-12 bg-[#111113] text-center">
-            <DatabaseIcon className="size-8 text-[#6b6b7a] mx-auto mb-3 opacity-50" />
-            <p className="text-[#6b6b7a]">No memories found</p>
-            <p className="text-xs text-[#6b6b7a] mt-1">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="border border-[#1e1e22] rounded-xl p-12 bg-[#111113]/50 backdrop-blur-sm text-center shadow-lg"
+          >
+            <DatabaseIcon className="size-10 text-[#6b6b7a] mx-auto mb-4 opacity-50" />
+            <p className="text-[#e8e8ea] font-medium">No memories found</p>
+            <p className="text-xs text-[#6b6b7a] mt-2 max-w-sm mx-auto leading-relaxed">
               Memories will appear here when VEGA stores facts during conversations
             </p>
-          </div>
+          </motion.div>
         ) : (
-          <div className="space-y-3">
-            {filteredMemories.map((memory) => (
-              <div
-                key={memory.id}
-                className="border border-[#1e1e22] rounded-lg p-4 bg-[#111113] hover:bg-[#1a1a1f] transition-colors"
-              >
-                <div className="flex items-start justify-between gap-4 mb-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-mono font-semibold text-[#00e5cc] truncate">
-                      {memory.key}
-                    </div>
-                    <p className="text-sm text-[#e8e8ea] mt-1 break-words">
-                      {memory.value}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleDelete(memory.id)}
-                    disabled={deleting === memory.id}
-                    className="flex items-center gap-2 px-3 py-1 rounded-md bg-[#1e1e22] hover:bg-red-600/10 text-[#6b6b7a] hover:text-red-400 transition-colors disabled:opacity-50 shrink-0"
-                  >
-                    <Trash2Icon className="size-4" />
-                  </button>
-                </div>
-                {memory.metadata && Object.keys(memory.metadata).length > 0 && (
-                  <div className="text-xs text-[#6b6b7a] mt-2 space-y-1">
-                    {Object.entries(memory.metadata).map(([k, v]) => (
-                      <div key={k}>
-                        <span className="font-semibold">{k}:</span> {v}
+          <div className="space-y-3 sm:space-y-4">
+            <AnimatePresence>
+              {filteredMemories.map((memory, index) => (
+                <motion.div
+                  key={memory.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.2 } }}
+                  transition={{ delay: Math.min(index * 0.05, 0.5) }}
+                  className="group border border-[#1e1e22] rounded-xl p-4 sm:p-5 bg-[#111113]/80 backdrop-blur-md hover:bg-[#1a1a1f] hover:border-[#3a3a44] transition-all shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-4 mb-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs sm:text-sm font-mono font-bold text-[#00e5cc] truncate w-fit px-2 py-0.5 rounded bg-[#00e5cc]/10 border border-[#00e5cc]/20 mb-2">
+                        {memory.key}
                       </div>
-                    ))}
+                      <p className="text-sm text-[#e8e8ea] leading-relaxed break-words">
+                        {memory.value}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleDelete(memory.id)}
+                      disabled={deleting === memory.id}
+                      className="flex items-center gap-2 p-2 rounded-lg border border-transparent hover:border-red-500/30 hover:bg-red-500/10 text-[#6b6b7a] hover:text-red-400 transition-all disabled:opacity-50 shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+                      title="Delete Memory"
+                    >
+                      <Trash2Icon className="size-4" />
+                    </button>
                   </div>
-                )}
-                <div className="text-xs text-[#6b6b7a] mt-2">
-                  {new Date(memory.createdAt).toLocaleString()}
-                </div>
-              </div>
-            ))}
+                  {memory.metadata && Object.keys(memory.metadata).length > 0 && (
+                    <div className="text-[10px] sm:text-xs text-[#6b6b7a] mt-3 space-y-1 bg-[#0a0a0b] p-2 rounded-md border border-[#1e1e22]">
+                      {Object.entries(memory.metadata).map(([k, v]) => (
+                        <div key={k} className="flex gap-2">
+                          <span className="font-semibold text-[#8b8b9a] uppercase tracking-wider">{k}:</span>
+                          <span className="truncate">{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="text-[10px] text-[#4a4a58] mt-3 font-mono">
+                    {new Date(memory.createdAt).toLocaleString()}
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         )}
 

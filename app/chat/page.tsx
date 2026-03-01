@@ -1,3 +1,4 @@
+//app/chat/page.tsx
 "use client";
 
 /**
@@ -13,7 +14,8 @@
 import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { nanoid } from "nanoid";
-import { CopyIcon, RefreshCwIcon } from "lucide-react";
+import { CopyIcon, RefreshCwIcon, ArrowUpIcon } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,69 +85,81 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
         TOOLS ({tools.length})
       </p>
       <div className="space-y-1">
-        {tools.map((tool) => {
-          const isOpen = expanded[tool.id] ?? (tool.status === "running");
-          return (
-            <div
-              key={tool.id}
-              className="rounded border border-[#1e1e22] bg-[#111113] overflow-hidden"
-            >
-              {/* Header */}
-              <button
-                onClick={() => toggleExpand(tool.id)}
-                className="w-full px-3 py-1.5 flex items-center justify-between gap-2 hover:bg-[#1a1a1d] transition-colors text-left"
+        <AnimatePresence>
+          {tools.map((tool) => {
+            const isOpen = expanded[tool.id] ?? (tool.status === "running");
+            return (
+              <motion.div
+                key={tool.id}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                className="rounded-lg border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-sm overflow-hidden"
               >
-                <div className="flex items-center gap-2 min-w-0">
-                  {tool.status === "running" && (
-                    <span className="inline-block size-1.5 rounded-full bg-yellow-400 animate-pulse shrink-0" />
-                  )}
-                  {tool.status === "completed" && (
-                    <span className="inline-block size-1.5 rounded-full bg-[#00e5cc] shrink-0" />
-                  )}
-                  {tool.status === "error" && (
-                    <span className="inline-block size-1.5 rounded-full bg-red-500 shrink-0" />
-                  )}
-                  <span className="text-xs font-mono text-[#e8e8ea] truncate">
-                    {getToolIcon(tool.name)} {tool.name}
+                {/* Header */}
+                <button
+                  onClick={() => toggleExpand(tool.id)}
+                  className="w-full px-3 py-2 flex items-center justify-between gap-2 hover:bg-[#1a1a1d] transition-colors text-left"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {tool.status === "running" && (
+                      <span className="inline-block size-1.5 rounded-full bg-yellow-400 animate-pulse shrink-0" />
+                    )}
+                    {tool.status === "completed" && (
+                      <span className="inline-block size-1.5 rounded-full bg-[#00e5cc] shrink-0" />
+                    )}
+                    {tool.status === "error" && (
+                      <span className="inline-block size-1.5 rounded-full bg-red-500 shrink-0" />
+                    )}
+                    <span className="text-[10px] sm:text-xs font-mono text-[#e8e8ea] truncate">
+                      {getToolIcon(tool.name)} {tool.name}
+                    </span>
+                  </div>
+                  <span className="text-[9px] sm:text-[10px] text-[#6b6b7a] shrink-0 capitalize">
+                    {tool.status === "running" ? "running…" : tool.status}
                   </span>
-                </div>
-                <span className="text-[10px] text-[#6b6b7a] shrink-0 capitalize">
-                  {tool.status === "running" ? "running…" : tool.status}
-                </span>
-              </button>
+                </button>
 
-              {/* Body */}
-              {isOpen && (
-                <div className="border-t border-[#1e1e22] text-xs font-mono">
-                  {tool.input && (
-                    <div className="px-3 py-2 border-b border-[#1e1e22] bg-[#0a0a0b]">
-                      <p className="text-[10px] text-[#6b6b7a] uppercase mb-1">Params</p>
-                      <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-20 scrollbar-thin">
-                        {JSON.stringify(tool.input, null, 2)}
-                      </pre>
-                    </div>
-                  )}
-                  {(tool.output || tool.errorText) && (
-                    <div className="px-3 py-2 bg-[#0a0a0b]">
-                      <p className={`text-[10px] uppercase mb-1 ${tool.errorText ? "text-red-400" : "text-[#6b6b7a]"}`}>
-                        {tool.errorText ? "Error" : "Output"}
-                      </p>
-                      {tool.errorText ? (
-                        <pre className="text-red-400 overflow-x-auto max-h-24 scrollbar-thin">{tool.errorText}</pre>
-                      ) : (
-                        <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-24 scrollbar-thin">
-                          {typeof tool.output === "string"
-                            ? tool.output
-                            : JSON.stringify(tool.output, null, 2)}
-                        </pre>
+                {/* Body */}
+                <AnimatePresence>
+                  {isOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="border-t border-[#1e1e22] text-[10px] sm:text-xs font-mono overflow-hidden"
+                    >
+                      {tool.input && (
+                        <div className="px-3 py-2 border-b border-[#1e1e22] bg-[#0a0a0b]/50">
+                          <p className="text-[10px] text-[#6b6b7a] uppercase mb-1">Params</p>
+                          <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-20 scrollbar-thin">
+                            {JSON.stringify(tool.input, null, 2)}
+                          </pre>
+                        </div>
                       )}
-                    </div>
+                      {(tool.output || tool.errorText) && (
+                        <div className="px-3 py-2 bg-[#0a0a0b]/50">
+                          <p className={`text-[10px] uppercase mb-1 ${tool.errorText ? "text-red-400" : "text-[#6b6b7a]"}`}>
+                            {tool.errorText ? "Error" : "Output"}
+                          </p>
+                          {tool.errorText ? (
+                            <pre className="text-red-400 overflow-x-auto max-h-24 scrollbar-thin">{tool.errorText}</pre>
+                          ) : (
+                            <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-24 scrollbar-thin">
+                              {typeof tool.output === "string"
+                                ? tool.output
+                                : JSON.stringify(tool.output, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      )}
+                    </motion.div>
                   )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+                </AnimatePresence>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
       </div>
     </div>
   );
@@ -223,21 +237,21 @@ function SimpleMarkdown({ content }: { content: string }) {
   };
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-1 sm:space-y-1.5">
       {lines.map((line, i) => {
         if (line.startsWith("### ")) {
-          return <h3 key={i} className="text-sm font-semibold text-[#e8e8ea] mt-3 mb-1">{renderInline(line.slice(4))}</h3>;
+          return <h3 key={i} className="text-[11px] sm:text-xs font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(4))}</h3>;
         }
         if (line.startsWith("## ")) {
-          return <h2 key={i} className="text-base font-semibold text-[#e8e8ea] mt-3 mb-1">{renderInline(line.slice(3))}</h2>;
+          return <h2 key={i} className="text-[12px] sm:text-[13px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(3))}</h2>;
         }
         if (line.startsWith("# ")) {
-          return <h1 key={i} className="text-lg font-bold text-[#e8e8ea] mt-3 mb-1">{renderInline(line.slice(2))}</h1>;
+          return <h1 key={i} className="text-[13px] sm:text-[14px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(2))}</h1>;
         }
         if (line.startsWith("- ") || line.startsWith("* ")) {
           return (
-            <div key={i} className="flex gap-2">
-              <span className="text-[#00e5cc] mt-0.5 shrink-0">·</span>
+            <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
+              <span className="text-[#00e5cc] mt-0.5 shrink-0 select-none">·</span>
               <span>{renderInline(line.slice(2))}</span>
             </div>
           );
@@ -246,17 +260,17 @@ function SimpleMarkdown({ content }: { content: string }) {
           const match = line.match(/^(\d+)\. (.*)/);
           if (match) {
             return (
-              <div key={i} className="flex gap-2">
-                <span className="text-[#00e5cc] shrink-0 font-mono text-xs mt-0.5">{match[1]}.</span>
+              <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
+                <span className="text-[#00e5cc] shrink-0 font-mono text-[9px] sm:text-[10px] mt-0.5 select-none">{match[1]}.</span>
                 <span>{renderInline(match[2])}</span>
               </div>
             );
           }
         }
         if (line.trim() === "") {
-          return <div key={i} className="h-2" />;
+          return <div key={i} className="h-1 sm:h-1.5" />;
         }
-        return <p key={i} className="leading-relaxed">{renderInline(line)}</p>;
+        return <p key={i} className="leading-relaxed text-[11px] sm:text-xs">{renderInline(line)}</p>;
       })}
     </div>
   );
@@ -637,48 +651,63 @@ function ChatPageContent() {
       </div>
 
       {/* ── Messages ───────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-4 space-y-6">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 sm:px-4 py-4 space-y-4 sm:space-y-6">
 
         {messages.length === 0 && !isLoading && (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-20">
-            <div className="text-4xl">⚡</div>
-            <p className="text-[#e8e8ea] font-semibold text-lg">VEGA CORE ACTIVE</p>
-            <p className="text-[#6b6b7a] text-xs max-w-xs">
+          <motion.div className="flex flex-col items-center justify-center h-full gap-3 sm:gap-4 text-center py-10 sm:py-20"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.5 }}
+          >
+            <div className="text-4xl sm:text-5xl drop-shadow-[0_0_15px_rgba(0,229,204,0.3)]">⚡</div>
+            <p className="text-[#e8e8ea] font-bold tracking-widest text-base sm:text-lg">VEGA CORE ACTIVE</p>
+            <p className="text-[#6b6b7a] text-[11px] sm:text-xs max-w-sm leading-relaxed px-4">
               Autonomous AI agent with web search, memory, code execution, workflows, and more.
             </p>
-          </div>
+          </motion.div>
         )}
 
-        {messages.map((msg) => (
-          <div
+        {messages.map((msg, idx) => (
+          <motion.div
             key={msg.id}
+            initial={{ opacity: 0, y: 10, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{
+              duration: 0.3,
+              ease: "easeOut",
+              delay: idx === messages.length - 1 ? 0 : 0 // Only animate the last one typically, or fast stagger
+            }}
             className={`flex w-full ${msg.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {msg.role === "user" ? (
               /* User bubble */
-              <div className="group max-w-[80%] flex items-start gap-2">
-                <div className="rounded-2xl bg-gradient-to-br from-[#00e5cc]/20 to-[#00e5cc]/5 border border-[#00e5cc]/20 px-4 py-2.5 text-sm text-[#e8e8ea]">
+              <div className="group max-w-[85%] sm:max-w-[75%] flex flex-row-reverse sm:flex-row items-end sm:items-start gap-1 sm:gap-1.5">
+                <div className="rounded-2xl rounded-br-sm sm:rounded-2xl bg-gradient-to-br from-[#00e5cc]/20 to-[#00e5cc]/5 border border-[#00e5cc]/20 px-3 py-2 sm:px-3 sm:py-2.5 text-[11px] sm:text-xs text-[#e8e8ea] shadow-sm backdrop-blur-sm">
                   {msg.content}
                 </div>
-                <CopyButton text={msg.content} />
+                <div className="sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                  <CopyButton text={msg.content} />
+                </div>
               </div>
             ) : (
               /* Assistant message */
-              <div className="group max-w-[95%] w-full flex flex-col gap-1">
+              <div className="group max-w-[95%] w-full flex flex-col gap-2">
                 {/* Tool calls for this message */}
                 {msg.tools && msg.tools.length > 0 && (
                   <ToolStream tools={msg.tools} />
                 )}
                 {/* Response body */}
-                <div className="flex items-start gap-2">
-                  <div className="border-l-2 border-[#00e5cc]/30 pl-4 py-1 text-sm text-[#e8e8ea]/90 flex-1">
+                <div className="flex items-start gap-2 sm:gap-2.5">
+                  <div className="border-l-2 border-[#00e5cc]/40 pl-3 py-0.5 text-[11px] sm:text-xs text-[#e8e8ea]/90 flex-1">
                     <SimpleMarkdown content={msg.content} />
                   </div>
-                  <CopyButton text={msg.content} />
+                  <div className="opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
+                    <CopyButton text={msg.content} />
+                  </div>
                 </div>
               </div>
             )}
-          </div>
+          </motion.div>
         ))}
 
         {/* ── Live streaming turn ───────────────────────────────────────── */}
@@ -695,56 +724,47 @@ function ChatPageContent() {
       </div>
 
       {/* ── Input area ─────────────────────────────────────────────────────── */}
-      <div className="shrink-0 border-t border-[#1e1e22] px-4 py-3">
-        <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-          <div className="relative rounded-lg border border-[#1e1e22] bg-[#111113] focus-within:border-[#00e5cc]/40 transition-colors">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              placeholder="System prompt ready. Awaiting instructions..."
-              disabled={isLoading}
-              rows={1}
-              className="w-full resize-none bg-transparent px-4 py-3 pr-14 text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[44px] max-h-[160px] font-mono"
-            />
-            <button
-              type={isLoading ? "button" : "submit"}
-              onClick={isLoading ? stopGeneration : undefined}
-              disabled={!isLoading && !input.trim()}
-              className="absolute right-2 bottom-2 size-8 flex items-center justify-center rounded-md bg-[#00e5cc] hover:bg-[#00c4b0] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              {isLoading ? (
-                <span className="size-3 rounded-sm bg-[#0a0a0b]" /> // stop icon
-              ) : (
-                <svg
-                  className="size-4 text-[#0a0a0b]"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <line x1="12" y1="19" x2="12" y2="5" />
-                  <polyline points="5 12 12 5 19 12" />
-                </svg>
-              )}
-            </button>
-          </div>
+      <div className="shrink-0 bg-gradient-to-t from-[#0a0a0b] via-[#0a0a0b] to-transparent pt-4 sm:pt-6 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe">
+        <div className="max-w-4xl mx-auto">
+          <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
+            <div className="relative rounded-2xl border border-[#1e1e22] bg-[#111113]/90 backdrop-blur-xl shadow-2xl focus-within:border-[#00e5cc]/50 focus-within:ring-1 focus-within:ring-[#00e5cc]/20 transition-all">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Message VEGA..."
+                disabled={isLoading}
+                rows={1}
+                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-12 sm:pr-16 text-[13px] sm:text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
+              />
+              <button
+                type={isLoading ? "button" : "submit"}
+                onClick={isLoading ? stopGeneration : undefined}
+                disabled={!isLoading && !input.trim()}
+                className="absolute right-1.5 bottom-1.5 sm:right-2 sm:bottom-2 size-8 sm:size-9 flex items-center justify-center rounded-xl bg-[#00e5cc] hover:bg-[#00c4b0] disabled:bg-[#1e1e22] disabled:text-[#6b6b7a] text-[#0a0a0b] transition-all"
+              >
+                {isLoading ? (
+                  <span className="size-3 sm:size-3.5 rounded-sm bg-current" /> // stop icon
+                ) : (
+                  <ArrowUpIcon className="size-4 sm:size-5" />
+                )}
+              </button>
+            </div>
 
-          {/* Footer status */}
-          <div className="flex items-center justify-between px-1">
-            <p className="text-[10px] text-[#6b6b7a] tracking-widest">
-              MISSION: <span className="text-[#00e5cc]">{sessionId.slice(-8).toUpperCase()}</span>{" "}
-              [{logCount} LOG ENTRIES]
-            </p>
-            <p className="text-[10px] text-[#6b6b7a] tracking-widest">
-              VEGA CORE ACTIVE.{" "}
-              <span className="text-[#e8e8ea]/40">WEB_SEARCH · RUN_CODE · WORKFLOW · MEMORY</span>
-            </p>
-          </div>
-        </form>
+            {/* Footer status */}
+            <div className="flex items-center justify-between px-2 opacity-60">
+              <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono">
+                MISSION: <span className="text-[#00e5cc]">{sessionId.slice(-8).toUpperCase()}</span>{" "}
+                <span className="hidden sm:inline">[{logCount} LOG ENTRIES]</span>
+              </p>
+              <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono text-right">
+                <span className="hidden sm:inline">VEGA CORE ACTIVE.{" "}</span>
+                <span className="text-[#e8e8ea]/40">AI CAN MAKE MISTAKES.</span>
+              </p>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+//cli
 /**
  * cli.ts — Terminal chat client for the autonomous agent
  *

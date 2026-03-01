@@ -1,3 +1,4 @@
+//components/layout/sidebar.tsx
 "use client";
 
 import { useState, useEffect } from "react";
@@ -5,6 +6,7 @@ import Link from "next/link";
 import { BotIcon, MenuIcon, XIcon, MessageSquareIcon, SettingsIcon, DatabaseIcon, WrenchIcon, HistoryIcon, ChevronLeftIcon } from "lucide-react";
 import { NavItem } from "./nav-item";
 import { cn } from "@/lib/utils";
+import { AnimatePresence, motion } from "motion/react";
 
 interface ChatSession {
   id: string;
@@ -53,7 +55,7 @@ export function Sidebar() {
       {/* Mobile toggle */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="fixed top-4 left-4 z-40 lg:hidden p-2 rounded-md border border-[#1e1e22] bg-[#0a0a0b] hover:bg-[#1e1e22]"
+        className="fixed top-4 left-4 z-50 lg:hidden p-2 rounded-md border border-[#1e1e22] bg-[#0a0a0b]/80 backdrop-blur hover:bg-[#1e1e22] shadow-lg transition-colors"
         aria-label="Toggle sidebar"
       >
         {isOpen ? (
@@ -64,17 +66,22 @@ export function Sidebar() {
       </button>
 
       {/* Backdrop for mobile */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/50 lg:hidden"
-          onClick={() => setIsOpen(false)}
-        />
-      )}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm lg:hidden"
+            onClick={() => setIsOpen(false)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 border-r border-[#1e1e22] bg-[#0a0a0b]/95 backdrop-blur-sm flex flex-col z-30 transition-all duration-300 lg:z-20 lg:translate-x-0",
+          "fixed inset-y-0 left-0 border-r border-[#1e1e22] bg-[#0a0a0b]/95 backdrop-blur-md flex flex-col z-40 transition-all duration-300 ease-in-out lg:z-20 lg:translate-x-0 shadow-2xl lg:shadow-none",
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
           isCollapsed ? "w-20" : "w-64"
         )}

@@ -1,3 +1,4 @@
+//src/app/settings/page.tsx
 "use client";
 
 /**
@@ -37,6 +38,7 @@ import {
   CopyIcon,
   CheckIcon,
 } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 
 // ─── API helper ───────────────────────────────────────────────────────────────
 
@@ -128,15 +130,18 @@ export default function SettingsPage() {
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
-      <div className="max-w-2xl mx-auto px-4 py-8 space-y-8">
+      <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-6 sm:space-y-8">
 
         {/* Page header */}
-        <div>
-          <h1 className="text-2xl font-bold text-[#e8e8ea]">Settings</h1>
-          <p className="text-sm text-[#6b6b7a] mt-1">
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+        >
+          <h1 className="text-xl sm:text-2xl font-bold text-[#e8e8ea]">Settings</h1>
+          <p className="text-xs sm:text-sm text-[#6b6b7a] mt-1">
             Connect integrations and configure VEGA.
           </p>
-        </div>
+        </motion.div>
 
         {/* ── Telegram Integration ─────────────────────────────────────────────── */}
         <TelegramSection
@@ -219,25 +224,30 @@ function TelegramSection({
   const isConnected = status?.connected && status.bot;
 
   return (
-    <section className="space-y-4">
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.1 }}
+      className="space-y-4"
+    >
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {/* Telegram logo SVG */}
-          <div className="flex size-9 items-center justify-center rounded-lg bg-[#229ED9]/10 border border-[#229ED9]/20">
-            <svg className="size-5" viewBox="0 0 24 24" fill="#229ED9">
+          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-[#229ED9]/10 border border-[#229ED9]/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+            <svg className="size-4 sm:size-5" viewBox="0 0 24 24" fill="#229ED9">
               <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
             </svg>
           </div>
           <div>
-            <h2 className="text-base font-semibold text-[#e8e8ea]">Telegram</h2>
-            <p className="text-xs text-[#6b6b7a]">Chat with VEGA directly in Telegram</p>
+            <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">Telegram</h2>
+            <p className="text-[10px] sm:text-xs text-[#6b6b7a]">Chat with VEGA directly in Telegram</p>
           </div>
         </div>
 
         {/* Connection badge */}
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${isConnected
-          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider ${isConnected
+          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]"
           : "bg-[#1e1e22] text-[#6b6b7a] border border-[#2a2a30]"
           }`}>
           {isConnected
@@ -248,7 +258,7 @@ function TelegramSection({
       </div>
 
       {/* Card */}
-      <div className="rounded-xl border border-[#1e1e22] bg-[#0d0d10] overflow-hidden">
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden shadow-sm">
 
         {/* ── Connected state ─────────────────────────────────────────────── */}
         {isConnected && status?.bot ? (
@@ -439,10 +449,18 @@ function TelegramSection({
       </div>
 
       {/* ── Activity Feed ─────────────────────────────────────────────────────── */}
-      {isConnected && (
-        <ActivityFeed activity={activity} onRefresh={onActivityRefresh} />
-      )}
-    </section>
+      <AnimatePresence>
+        {isConnected && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+          >
+            <ActivityFeed activity={activity} onRefresh={onActivityRefresh} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.section>
   );
 }
 
@@ -468,7 +486,7 @@ function ActivityFeed({
         </button>
       </div>
 
-      <div className="rounded-xl border border-[#1e1e22] bg-[#0d0d10] overflow-hidden">
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden shadow-sm">
         {activity.length === 0 ? (
           <div className="py-10 text-center">
             <MessageSquareIcon className="size-8 text-[#2a2a30] mx-auto mb-2" />
@@ -478,43 +496,51 @@ function ActivityFeed({
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-[#1e1e22]">
-            {activity.map((item, i) => (
-              <div key={i} className="px-4 py-3">
-                <div className="flex items-center gap-2 mb-1.5">
-                  {/* User avatar placeholder */}
-                  <div className="flex size-6 items-center justify-center rounded-full bg-[#229ED9]/10 text-xs text-[#229ED9] font-bold shrink-0">
-                    {(item.firstName ?? item.username ?? "?")[0].toUpperCase()}
-                  </div>
-                  <span className="text-xs font-medium text-[#e8e8ea]">
-                    {item.firstName ?? item.username}
-                  </span>
-                  {item.username && (
-                    <span className="text-xs text-[#4a4a58]">@{item.username}</span>
-                  )}
-                  <span className="ml-auto text-xs text-[#3a3a44]">
-                    {formatRelTime(item.ts)}
-                  </span>
-                </div>
-
-                <div className="ml-8 space-y-1">
-                  <div className="flex items-start gap-1.5">
-                    <span className="text-[#4a4a58] text-xs shrink-0 mt-0.5">→</span>
-                    <p className="text-xs text-[#6b6b7a] leading-relaxed truncate">
-                      {item.messagePreview}
-                    </p>
-                  </div>
-                  <div className="flex items-start gap-1.5">
-                    <div className="size-3 shrink-0 mt-0.5 flex items-center justify-center">
-                      <BotIcon className="size-2.5 text-[#00e5cc]" />
+          <div className="divide-y divide-[#1e1e22]/60">
+            <AnimatePresence>
+              {activity.map((item, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.05 }}
+                  className="px-4 py-4 hover:bg-[#1a1a1f]/50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    {/* User avatar placeholder */}
+                    <div className="flex size-6 sm:size-7 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/20 text-xs text-[#229ED9] font-bold shrink-0">
+                      {(item.firstName ?? item.username ?? "?")[0].toUpperCase()}
                     </div>
-                    <p className="text-xs text-[#e8e8ea]/60 leading-relaxed truncate">
-                      {item.replyPreview}
-                    </p>
+                    <span className="text-xs sm:text-sm font-bold text-[#e8e8ea]">
+                      {item.firstName ?? item.username}
+                    </span>
+                    {item.username && (
+                      <span className="text-[10px] sm:text-xs text-[#4a4a58]">@{item.username}</span>
+                    )}
+                    <span className="ml-auto text-[10px] sm:text-xs text-[#3a3a44] font-mono">
+                      {formatRelTime(item.ts)}
+                    </span>
                   </div>
-                </div>
-              </div>
-            ))}
+
+                  <div className="ml-8 sm:ml-9 space-y-1.5">
+                    <div className="flex items-start gap-2">
+                      <span className="text-[#4a4a58] text-xs shrink-0 mt-0.5 opacity-50">→</span>
+                      <p className="text-xs sm:text-sm text-[#8b8b9a] leading-relaxed truncate">
+                        {item.messagePreview}
+                      </p>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <div className="size-3 sm:size-4 shrink-0 mt-0.5 flex items-center justify-center">
+                        <BotIcon className="size-2.5 sm:size-3 text-[#00e5cc]" />
+                      </div>
+                      <p className="text-xs sm:text-sm text-[#e8e8ea]/80 leading-relaxed truncate italic">
+                        {item.replyPreview}
+                      </p>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         )}
       </div>
@@ -552,13 +578,18 @@ function DangerZone() {
   };
 
   return (
-    <section className="space-y-4">
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+      className="space-y-4"
+    >
       <div className="flex items-center gap-2">
-        <AlertTriangleIcon className="size-4 text-red-400" />
-        <h2 className="text-base font-semibold text-[#e8e8ea]">Danger Zone</h2>
+        <AlertTriangleIcon className="size-4 sm:size-5 text-red-400" />
+        <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">Danger Zone</h2>
       </div>
 
-      <div className="rounded-xl border border-red-500/20 bg-[#0d0d10] divide-y divide-[#1e1e22] overflow-hidden">
+      <div className="rounded-xl border border-red-500/20 bg-[#111113]/80 backdrop-blur-md divide-y divide-red-500/10 overflow-hidden shadow-[0_0_15px_rgba(239,68,68,0.05)]">
         <DangerRow
           title="Clear all memory"
           description="Permanently delete all key-value memories stored in Redis."
@@ -576,7 +607,7 @@ function DangerZone() {
           onAction={handleClearHistory}
         />
       </div>
-    </section>
+    </motion.section>
   );
 }
 

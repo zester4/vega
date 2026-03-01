@@ -400,7 +400,10 @@ app.post("/telegram/setup", async (c) => {
 
     // Use the public HTTPS URL from wrangler.toml for the webhook
     const workerUrl = c.env.UPSTASH_WORKFLOW_URL?.replace(/\/$/, "");
+    console.log(`[Telegram Setup] Using Worker URL: ${workerUrl}`);
+
     if (!workerUrl || !workerUrl.startsWith("https://")) {
+      console.error(`[Telegram Setup] ERROR: Invalid Worker URL: ${workerUrl}`);
       throw new Error("UPSTASH_WORKFLOW_URL must be a valid HTTPS URL in wrangler.toml");
     }
 
