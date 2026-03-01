@@ -51,6 +51,7 @@
  *     github            → GitHub API (repos, files, issues, code search)
  *     send_email        → Send email via Resend
  *     send_sms          → Send SMS via Twilio
+ *     local_fs          → Full local filesystem access (OS-agnostic)
  *
  *   IMAGE & VOICE
  *     generate_image    → Gemini 3.1 Flash Image Preview (Nano Banana 2)
@@ -75,6 +76,7 @@
 
 import { Client as QStashClient } from "@upstash/qstash";
 import type { RegisteredTool } from "../memory";
+import { execLocalFsTool } from "./local-fs";
 
 // ─── Tool Declarations (Gemini sees these) ────────────────────────────────────
 
@@ -430,6 +432,7 @@ export const BUILTIN_DECLARATIONS = [
     name: "get_datetime",
     description: "Get the current date and time in UTC and optionally in a specific timezone. Use before any time-sensitive operations.",
     parameters: {
+      type: "object",
       properties: {
         timezone: { type: "string", description: "Optional IANA timezone e.g. 'America/New_York', 'Europe/London', 'Asia/Tokyo'" },
       },
@@ -437,6 +440,32 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  {
+    name: "local_fs",
+    description: "Full read/write/exec access to your local machine (MacOS, Windows, Linux). Built-in Smart Filtering: Excludes node_modules, .next, .git by default. Features 12+ operations. Bulk read and search supported. CRITICAL: Destructive/System-level actions triggered an Approval Gate.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          description: "Operation to perform",
+          enum: ["list", "read", "write", "delete", "move", "copy", "mkdir", "exists", "stats", "search", "exec"]
+        },
+        path: { type: "string", description: "Primary target path (relative to project root)" },
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Array of paths for bulk 'read' operation"
+        },
+        content: { type: "string", description: "Content for 'write' operation" },
+        newPath: { type: "string", description: "Destination for 'move' or 'copy'" },
+        pattern: { type: "string", description: "Filename pattern/substring for 'search'" },
+        command: { type: "string", description: "Terminal command for 'exec' (Approved only)" },
+        showHidden: { type: "boolean", description: "If true, overrides filters and shows node_modules, etc." }
+      },
+      required: ["action"],
+    },
+  },
   // ── CRON REGISTRY & APPROVALS ──────────────────────────────────────────────
 
   {
@@ -790,7 +819,6 @@ export async function executeTool(
 
       // Scheduling
       case "schedule_cron": return await execScheduleCron(args, env);
-      case "get_datetime": return execGetDatetime(args);
       case "list_crons": return await execListCrons(args, env);
       case "update_cron": return await execUpdateCron(args, env);
       case "delete_cron": return await execDeleteCron(args, env);
@@ -801,6 +829,8 @@ export async function executeTool(
       case "github": return await execGithub(args, env);
       case "send_email": return await execSendEmail(args, env);
       case "send_sms": return await execSendSMS(args, env);
+      case "get_datetime": return await execGetDateTime(args, env);
+      case "local_fs": return await execLocalFsTool(args, env);
 
       // Image & Voice
       case "generate_image": return await execGenerateImageTool(args, env);
@@ -1304,7 +1334,7 @@ async function execListFiles(args: ToolArgs, env: Env): Promise<Record<string, u
   }
 
   const list = await env.FILES_BUCKET.list({ prefix: String(prefix) });
-  const files = list.objects.map((o) => ({
+  const files = list.objects.map((o: any) => ({
     key: o.key,
     size: o.size,
     modified: o.uploaded.toISOString(),
@@ -1390,6 +1420,31 @@ function execCalculate(args: ToolArgs): Record<string, unknown> {
     return { expression, result, type: typeof result };
   } catch (e) {
     return { error: `Calculation failed: ${String(e)}`, expression };
+  }
+}
+
+async function execGetDateTime(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { timezone = "UTC" } = args as { timezone?: string };
+  try {
+    const now = new Date();
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    };
+    const formatter = new Intl.DateTimeFormat("en-US", options);
+    return {
+      utc: now.toISOString(),
+      local: formatter.format(now),
+      timezone,
+    };
+  } catch (e) {
+    return { error: `Invalid timezone: ${timezone}`, utc: new Date().toISOString() };
   }
 }
 

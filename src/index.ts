@@ -28,7 +28,8 @@
 import { Hono } from "hono";
 import { serve } from "@upstash/workflow/cloudflare";
 import { Client as QStashClient, Receiver } from "@upstash/qstash";
-import { runAgent } from "./agent";
+import { runAgent, type ToolEvent } from "./agent";
+import { BUILTIN_DECLARATIONS } from "./tools/builtins";
 import { getRedis, getTask, updateTask, listTasks, listSchedules, listTools } from "./memory";
 import { workflowHandler } from "./routes/workflow";
 import type { WorkflowPayload } from "./routes/workflow";
@@ -414,7 +415,43 @@ app.get("/notifications", async (c) => {
   }
 });
 
-// ─── Tasks & Schedules Registry (for dashboards) ──────────────────────────────
+// ─── Tools & Capabilities Registry ───────────────────────────────────────────
+
+app.get("/tools/v1/registry", async (c) => {
+  try {
+    const redis = getRedis(c.env);
+    const customTools = await listTools(redis);
+
+    // Merge built-in and custom tools with enhanced metadata
+    const registry = [
+      ...BUILTIN_DECLARATIONS.map((t: any) => ({
+        ...t,
+        id: `builtin-${t.name}`,
+        source: "system",
+        category: "core",
+        status: "active"
+      })),
+      ...customTools.map((t: any) => ({
+        ...t,
+        id: `custom-${t.name}`,
+        source: "user",
+        category: "extension",
+        status: "active"
+      }))
+    ];
+
+    return c.json({
+      success: true,
+      count: registry.length,
+      tools: registry,
+      version: "1.0.0",
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    console.error("[Registry Error]", err);
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
 
 app.get("/tasks", async (c) => {
   try {
