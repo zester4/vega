@@ -76,7 +76,7 @@ export default function ToolsDashboard() {
   }, [tools, searchQuery, selectedCategory]);
 
   return (
-    <div className="min-h-full bg-[#050507] text-[#e8e8ea] selection:bg-[#00e5cc]/30 p-4 sm:p-10 font-sans">
+    <div className="h-full overflow-y-auto bg-[#050507] text-[#e8e8ea] selection:bg-[#00e5cc]/30 p-4 sm:p-10 font-sans">
       <div className="max-w-7xl mx-auto">
         {/* Header Section */}
         <header className="mb-12 relative">
