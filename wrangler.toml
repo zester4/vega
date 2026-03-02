@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 # Your URLs
 WORKER_URL = "https://autonomous-ai-agent.adesrnd.workers.dev"
 UPSTASH_WORKFLOW_URL = "https://autonomous-ai-agent.adesrnd.workers.dev" # Must be worker for Upstash
-BRIDGE_URL = "https://vega-ebon.vercel.app" # The Vercel app or ngrok tunnel
+BRIDGE_URL = "https://vega-ebon.vercel.app" # Next.js bridge (Vercel) for local-fs and other API routes
 # ─── R2 File Storage ──────────────────────────────────────────────────────────
 # Create bucket first: wrangler r2 bucket create vega-agent-files
 [[r2_buckets]]

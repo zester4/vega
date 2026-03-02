@@ -107,15 +107,15 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
             // Detect human_approval_gate outputs
             const approval =
               tool.name === "human_approval_gate" &&
-              tool.output &&
-              typeof tool.output === "object"
+                tool.output &&
+                typeof tool.output === "object"
                 ? (tool.output as {
-                    id?: string;
-                    operation?: string;
-                    status?: string;
-                    channel?: string;
-                    message?: string;
-                  })
+                  id?: string;
+                  operation?: string;
+                  status?: string;
+                  channel?: string;
+                  message?: string;
+                })
                 : null;
 
             return (
@@ -277,11 +277,10 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                           ) : (
                             <>
                               <p
-                                className={`text-[10px] uppercase mb-1 ${
-                                  tool.errorText
+                                className={`text-[10px] uppercase mb-1 ${tool.errorText
                                     ? "text-red-400"
                                     : "text-[#6b6b7a]"
-                                }`}
+                                  }`}
                               >
                                 {tool.errorText ? "Error" : "Output"}
                               </p>
@@ -341,82 +340,139 @@ function CopyButton({ text }: { text: string }) {
 // For full markdown, use Streamdown from message.tsx in a real integration.
 // This inline version handles bold, inline code, and headers.
 
+function isImageUrl(url: string): boolean {
+  // Match R2 worker URLs like https://*.workers.dev/files/generated/...
+  if (/workers\.dev\/files\/generated\//.test(url)) return true;
+  // Match common image extensions
+  if (/\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(url)) return true;
+  return false;
+}
+
+function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState(false);
+  return (
+    <div className="my-2 rounded-xl overflow-hidden border border-[#1e1e22] bg-[#111113] max-w-[400px]">
+      {!error ? (
+        <>
+          {!loaded && (
+            <div className="h-40 flex items-center justify-center text-[10px] text-[#6b6b7a] gap-2">
+              <span className="inline-block size-2 rounded-full bg-[#00e5cc]/60 animate-pulse" />
+              Loading image…
+            </div>
+          )}
+          <img
+            src={url}
+            alt={alt}
+            onLoad={() => setLoaded(true)}
+            onError={() => setError(true)}
+            className={`w-full object-cover rounded-xl transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0 h-0"}`}
+          />
+          {loaded && (
+            <div className="flex items-center justify-between px-3 py-1.5 border-t border-[#1e1e22]">
+              <span className="text-[10px] text-[#6b6b7a] truncate max-w-[200px]">{alt}</span>
+              <a
+                href={url}
+                download
+                target="_blank"
+                rel="noreferrer"
+                className="text-[10px] text-[#00e5cc] hover:underline shrink-0 ml-2"
+              >
+                ↓ Download
+              </a>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="px-3 py-2 text-[10px] text-red-400">⚠️ Could not load image</div>
+      )}
+    </div>
+  );
+}
+
 function SimpleMarkdown({ content }: { content: string }) {
   const lines = content.split("\n");
 
-  const renderInline = (text: string) => {
-    // Bold: **text** or __text__
-    // Inline code: `code`
+  const renderInline = (text: string): React.ReactNode[] => {
     const parts: React.ReactNode[] = [];
     let remaining = text;
     let key = 0;
 
-    const patterns = [
-      { re: /\*\*(.+?)\*\*/s, wrap: (m: string) => <strong key={key++} className="font-semibold text-[#e8e8ea]">{m}</strong> },
-      { re: /`([^`]+)`/, wrap: (m: string) => <code key={key++} className="bg-[#1e1e22] rounded px-1 text-[#00e5cc] font-mono text-[0.85em]">{m}</code> },
-    ];
+    // Check for markdown image: ![alt](url)
+    const imgMdRe = /!\[([^\]]*)\]\(([^)]+)\)/;
+    // Check for bare image URLs
+    const imgUrlRe = /https?:\/\/\S+/g;
 
     while (remaining.length > 0) {
-      let earliest: { index: number; match: RegExpMatchArray; wrap: (m: string) => React.ReactNode } | null = null;
+      // Try markdown image first
+      const imgMd = remaining.match(imgMdRe);
+      if (imgMd && imgMd.index !== undefined) {
+        if (imgMd.index > 0) parts.push(remaining.slice(0, imgMd.index));
+        const [, alt, url] = imgMd;
+        if (isImageUrl(url)) {
+          parts.push(<InlineImage key={key++} url={url} alt={alt || "Generated image"} />);
+        } else {
+          parts.push(<a key={key++} href={url} target="_blank" rel="noreferrer" className="text-[#00e5cc] underline">{alt || url}</a>);
+        }
+        remaining = remaining.slice((imgMd.index) + imgMd[0].length);
+        continue;
+      }
 
+      // Patterns for bold + inline code
+      const patterns = [
+        { re: /\*\*(.+?)\*\*/s, wrap: (m: string) => <strong key={key++} className="font-semibold text-[#e8e8ea]">{m}</strong> },
+        { re: /`([^`]+)`/, wrap: (m: string) => <code key={key++} className="bg-[#1e1e22] rounded px-1 text-[#00e5cc] font-mono text-[0.85em]">{m}</code> },
+      ] as const;
+
+      let earliest: { index: number; match: RegExpMatchArray; wrap: (m: string) => React.ReactNode } | null = null;
       for (const { re, wrap } of patterns) {
         const m = remaining.match(re);
         if (m && m.index !== undefined) {
-          if (!earliest || m.index < earliest.index) {
-            earliest = { index: m.index, match: m, wrap };
-          }
+          if (!earliest || m.index < earliest.index) earliest = { index: m.index, match: m, wrap };
         }
       }
 
-      if (!earliest) {
-        parts.push(remaining);
-        break;
+      // Also scan for raw image URLs
+      imgUrlRe.lastIndex = 0;
+      const urlMatch = imgUrlRe.exec(remaining);
+      if (urlMatch && isImageUrl(urlMatch[0])) {
+        const urlIndex = urlMatch.index;
+        if (!earliest || urlIndex < earliest.index) {
+          if (urlIndex > 0) parts.push(remaining.slice(0, urlIndex));
+          parts.push(<InlineImage key={key++} url={urlMatch[0]} />);
+          remaining = remaining.slice(urlIndex + urlMatch[0].length);
+          continue;
+        }
       }
 
-      if (earliest.index > 0) {
-        parts.push(remaining.slice(0, earliest.index));
-      }
+      if (!earliest) { parts.push(remaining); break; }
+      if (earliest.index > 0) parts.push(remaining.slice(0, earliest.index));
       parts.push(earliest.wrap(earliest.match[1]));
       remaining = remaining.slice(earliest.index + earliest.match[0].length);
     }
-
     return parts;
   };
 
   return (
     <div className="space-y-1 sm:space-y-1.5">
       {lines.map((line, i) => {
-        if (line.startsWith("### ")) {
-          return <h3 key={i} className="text-[11px] sm:text-xs font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(4))}</h3>;
-        }
-        if (line.startsWith("## ")) {
-          return <h2 key={i} className="text-[12px] sm:text-[13px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(3))}</h2>;
-        }
-        if (line.startsWith("# ")) {
-          return <h1 key={i} className="text-[13px] sm:text-[14px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(2))}</h1>;
-        }
-        if (line.startsWith("- ") || line.startsWith("* ")) {
-          return (
-            <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
-              <span className="text-[#00e5cc] mt-0.5 shrink-0 select-none">·</span>
-              <span>{renderInline(line.slice(2))}</span>
-            </div>
-          );
-        }
-        if (/^\d+\. /.test(line)) {
-          const match = line.match(/^(\d+)\. (.*)/);
-          if (match) {
-            return (
-              <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
-                <span className="text-[#00e5cc] shrink-0 font-mono text-[9px] sm:text-[10px] mt-0.5 select-none">{match[1]}.</span>
-                <span>{renderInline(match[2])}</span>
-              </div>
-            );
-          }
-        }
-        if (line.trim() === "") {
-          return <div key={i} className="h-1 sm:h-1.5" />;
-        }
+        if (line.startsWith("### ")) return <h3 key={i} className="text-[11px] sm:text-xs font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(4))}</h3>;
+        if (line.startsWith("## ")) return <h2 key={i} className="text-[12px] sm:text-[13px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(3))}</h2>;
+        if (line.startsWith("# ")) return <h1 key={i} className="text-[13px] sm:text-[14px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(2))}</h1>;
+        if (line.startsWith("- ") || line.startsWith("* ")) return (
+          <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
+            <span className="text-[#00e5cc] mt-0.5 shrink-0 select-none">·</span>
+            <span>{renderInline(line.slice(2))}</span>
+          </div>
+        );
+        const numMatch = line.match(/^(\d+)\. (.*)/);
+        if (numMatch) return (
+          <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
+            <span className="text-[#00e5cc] shrink-0 font-mono text-[9px] sm:text-[10px] mt-0.5 select-none">{numMatch[1]}.</span>
+            <span>{renderInline(numMatch[2])}</span>
+          </div>
+        );
+        if (line.trim() === "") return <div key={i} className="h-1 sm:h-1.5" />;
         return <p key={i} className="leading-relaxed text-[11px] sm:text-xs">{renderInline(line)}</p>;
       })}
     </div>
