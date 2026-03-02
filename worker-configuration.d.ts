@@ -17,8 +17,10 @@
 
 interface Env {
   // ── Core ──────────────────────────────────────────────────────────────────
-  UPSTASH_WORKFLOW_URL: string;  // ngrok or deployed worker URL
-  TELEGRAM_BOT_TOKEN?: string;   // Optional fallback token
+  WORKER_URL: string;             // Deployed Worker URL (for webhooks/workflows)
+  BRIDGE_URL: string;             // Next.js Bridge URL (local or Vercel)
+  UPSTASH_WORKFLOW_URL: string;   // Required by Upstash Workflow (must match WORKER_URL)
+  TELEGRAM_BOT_TOKEN?: string;    // Optional fallback token
 
   // ── AI & Search ───────────────────────────────────────────────────────────
   GEMINI_API_KEY: string;  // Google Gemini API key

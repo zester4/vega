@@ -40,7 +40,7 @@ export async function execLocalFsTool(args: any, env: any): Promise<Record<strin
     }
 
     // 2. DISPATCH TO BRIDGE
-    const bridgeUrl = `${env.UPSTASH_WORKFLOW_URL?.replace(/\/$/, "")}/api/local-fs`;
+    const bridgeUrl = `${(env.BRIDGE_URL || env.UPSTASH_WORKFLOW_URL)?.replace(/\/$/, "")}/api/local-fs`;
 
     try {
         const res = await fetch(bridgeUrl, {

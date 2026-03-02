@@ -604,7 +604,7 @@ app.post("/telegram/setup", async (c) => {
     if (!botToken) return c.json({ error: "botToken is required" }, 400);
 
     // Use the public HTTPS URL from wrangler.toml for the webhook
-    const workerUrl = c.env.UPSTASH_WORKFLOW_URL?.replace(/\/$/, "");
+    const workerUrl = (c.env.WORKER_URL || c.env.UPSTASH_WORKFLOW_URL)?.replace(/\/$/, "");
     console.log(`[Telegram Setup] Using Worker URL: ${workerUrl}`);
 
     if (!workerUrl || !workerUrl.startsWith("https://")) {
