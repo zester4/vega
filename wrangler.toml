@@ -6,12 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 # ─── Public vars (not sensitive) ──────────────────────────────────────────────
 [vars]
 # Your worker URL — update this when you deploy or change ngrok
-UPSTASH_WORKFLOW_URL = "https://9896-154-161-36-247.ngrok-free.app"
+UPSTASH_WORKFLOW_URL = "https://vega-ebon.vercel.app"
 # ─── R2 File Storage ──────────────────────────────────────────────────────────
 # Create bucket first: wrangler r2 bucket create vega-agent-files
-#[[r2_buckets]]
-#binding     = "FILES_BUCKET"
-#bucket_name = "vega-agent-files"
+[[r2_buckets]]
+binding     = "FILES_BUCKET"
+bucket_name = "vega-agent-files"
 
 # ─── Secrets — set with: wrangler secret put SECRET_NAME ──────────────────────
 # AI & Search
