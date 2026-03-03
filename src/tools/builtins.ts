@@ -1458,10 +1458,14 @@ async function execTriggerWorkflow(args: ToolArgs, env: Env): Promise<Record<str
   };
 
   const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const qstash = new QStashClient({ token: env.QSTASH_TOKEN });
+  const qstash = new QStashClient({
+    token: env.QSTASH_TOKEN,
+    baseUrl: env.QSTASH_URL,
+  });
 
+  const workflowBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
   await qstash.publishJSON({
-    url: `${env.UPSTASH_WORKFLOW_URL}/workflow`,
+    url: `${workflowBase}/workflow`,
     body: {
       taskId,
       sessionId: sessionId ?? "agent-self",
@@ -1510,7 +1514,10 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
   };
 
   const agentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const qstash = new QStashClient({ token: env.QSTASH_TOKEN });
+  const qstash = new QStashClient({
+    token: env.QSTASH_TOKEN,
+    baseUrl: env.QSTASH_URL,
+  });
 
   const payload = {
     taskId: agentId,
@@ -1528,8 +1535,9 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
     },
   };
 
+  const workflowBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
   const publishOptions: Record<string, unknown> = {
-    url: `${env.UPSTASH_WORKFLOW_URL}/workflow`,
+    url: `${workflowBase}/workflow`,
     body: payload,
   };
 
@@ -1789,7 +1797,10 @@ async function execScheduleCron(args: ToolArgs, env: Env): Promise<Record<string
     url: string; cron: string; body?: string; description: string;
   };
 
-  const qstash = new QStashClient({ token: env.QSTASH_TOKEN });
+  const qstash = new QStashClient({
+    token: env.QSTASH_TOKEN,
+    baseUrl: env.QSTASH_URL,
+  });
   const result = await qstash.schedules.create({
     destination: url,
     cron,
@@ -1860,8 +1871,8 @@ async function execDeleteCron(args: ToolArgs, env: Env): Promise<Record<string, 
   if (!scheduleId) return { success: false, error: "scheduleId is required" };
 
   try {
-    // Delete from QStash
-    await fetch(`https://qstash.upstash.io/v2/schedules/${encodeURIComponent(scheduleId)}`, {
+    const base = env.QSTASH_URL.replace(/\/$/, "");
+    await fetch(`${base}/v2/schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",
       headers: {
         Authorization: `Bearer ${env.QSTASH_TOKEN}`,
@@ -1911,8 +1922,9 @@ async function execUpdateCron(args: ToolArgs, env: Env): Promise<Record<string, 
   const newDescription = description ?? existing.description;
 
   // Delete old schedule in QStash
+  const qstashBase = env.QSTASH_URL.replace(/\/$/, "");
   try {
-    await fetch(`https://qstash.upstash.io/v2/schedules/${encodeURIComponent(scheduleId)}`, {
+    await fetch(`${qstashBase}/v2/schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",
       headers: {
         Authorization: `Bearer ${env.QSTASH_TOKEN}`,
@@ -1923,7 +1935,10 @@ async function execUpdateCron(args: ToolArgs, env: Env): Promise<Record<string, 
   }
 
   // Recreate with updated config
-  const qstash = new QStashClient({ token: env.QSTASH_TOKEN });
+  const qstash = new QStashClient({
+    token: env.QSTASH_TOKEN,
+    baseUrl: env.QSTASH_URL,
+  });
   const created = await qstash.schedules.create({
     destination: existing.url ?? "",
     cron: newCron,

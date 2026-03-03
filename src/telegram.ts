@@ -27,6 +27,15 @@
  * ============================================================================
  */
 
+import {
+    ensureTelegramConfigsTable as dbEnsureTable,
+    getTelegramConfigBySecret as dbGetBySecret,
+    getTelegramConfigByUserId as dbGetByUserId,
+    insertTelegramConfig as dbInsertConfig,
+    deleteTelegramConfigByUserId as dbDeleteByUserId,
+    type TelegramConfigRow,
+} from "./db/queries";
+
 // ─── Telegram API Types ───────────────────────────────────────────────────────
 
 export interface TelegramUpdate {
@@ -106,7 +115,7 @@ export interface TelegramInlineKeyboard {
     inline_keyboard: Array<Array<{ text: string; callback_data?: string; url?: string }>>;
 }
 
-// ─── Bot Info stored in Redis ─────────────────────────────────────────────────
+// ─── Bot Info (Redis or D1) ─────────────────────────────────────────────────────
 
 export interface TelegramBotConfig {
     token: string;
@@ -116,6 +125,8 @@ export interface TelegramBotConfig {
     webhookUrl: string;
     secret: string;
     connectedAt: string;
+    /** Set when loaded from D1; used for per-user activity key */
+    userId?: string;
 }
 
 // ─── TelegramBot API Client ───────────────────────────────────────────────────
@@ -776,6 +787,24 @@ async function processMessage(
     // Delete progress message
     if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
 
+    // When we send images as photos, remove image URLs from the text so we don't show links
+    if (generatedImages.length > 0) {
+        const imageUrls = new Set(generatedImages.map((i) => i.url));
+        reply = reply
+            .split("\n")
+            .filter((line) => {
+                const t = line.trim();
+                if (!t) return true;
+                if (imageUrls.has(t)) return false;
+                const mdImg = /!\[([^\]]*)\]\(([^)]+)\)/.exec(t);
+                if (mdImg && imageUrls.has(mdImg[2].trim())) return false;
+                return true;
+            })
+            .join("\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+    }
+
     // ── Check voice mode preference ──────────────────────────────────────────────
     const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
 
@@ -848,8 +877,9 @@ async function processMessage(
         }
     }
 
+    const activityKey = config.userId ? `tg:activity:${config.userId}` : "tg:activity";
     try {
-        await redis.lpush("tg:activity", JSON.stringify({
+        await redis.lpush(activityKey, JSON.stringify({
             chatId,
             username: msg.from?.username ?? `user_${msg.from?.id}`,
             firstName: msg.from?.first_name,
@@ -859,7 +889,7 @@ async function processMessage(
             detectedLang,
             ts: Date.now(),
         }));
-        await redis.ltrim("tg:activity", 0, 49);
+        await redis.ltrim(activityKey, 0, 49);
     } catch { /* non-fatal */ }
 }
 
@@ -891,14 +921,90 @@ export async function getTelegramSecret(botToken: string): Promise<string> {
         .slice(0, 64);
 }
 
+// ─── D1 helpers (use src/db/schema.ts + src/db/queries.ts) ─────────────────────
+
+function rowToConfig(row: TelegramConfigRow, userId?: string): TelegramBotConfig {
+    const c: TelegramBotConfig = {
+        token: row.token,
+        botId: row.bot_id,
+        username: row.username,
+        firstName: row.first_name,
+        webhookUrl: row.webhook_url,
+        secret: row.secret,
+        connectedAt: row.connected_at,
+    };
+    if (userId) c.userId = userId;
+    return c;
+}
+
+function getDb(env: Env): D1Database | null {
+    return (env as { DB?: D1Database }).DB ?? null;
+}
+
+export async function ensureTelegramConfigsTable(env: Env): Promise<void> {
+    const db = getDb(env);
+    if (!db) return;
+    await dbEnsureTable(db);
+}
+
+/** Resolve bot config by webhook secret (for POST /telegram/webhook). Returns null if no D1 or no row. */
+export async function getTelegramConfigBySecret(env: Env, secret: string): Promise<TelegramBotConfig | null> {
+    const db = getDb(env);
+    if (!db) return null;
+    const row = await dbGetBySecret(db, secret);
+    if (!row) return null;
+    return rowToConfig(row, row.user_id);
+}
+
+/** Get config by user id (for GET /telegram/status, DELETE /telegram/disconnect). */
+export async function getTelegramConfigByUserId(env: Env, userId: string): Promise<TelegramBotConfig | null> {
+    const db = getDb(env);
+    if (!db) return null;
+    const row = await dbGetByUserId(db, userId);
+    if (!row) return null;
+    return rowToConfig(row, userId);
+}
+
+export async function insertTelegramConfig(env: Env, userId: string, config: TelegramBotConfig): Promise<void> {
+    const db = getDb(env);
+    if (!db) throw new Error("D1 not bound");
+    await dbEnsureTable(db);
+    await dbInsertConfig(db, userId, {
+        token: config.token,
+        secret: config.secret,
+        bot_id: config.botId,
+        username: config.username,
+        first_name: config.firstName,
+        webhook_url: config.webhookUrl,
+        connected_at: config.connectedAt,
+    });
+}
+
+export async function deleteTelegramConfigByUserId(env: Env, userId: string): Promise<void> {
+    const db = getDb(env);
+    if (!db) return;
+    await dbDeleteByUserId(db, userId);
+}
+
+/** Verify internal secret (Next.js → Worker). */
+export function verifyTelegramInternalSecret(env: Env, header: string | null): boolean {
+    const expected = (env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+    if (!expected || !header) return false;
+    if (header.length !== expected.length) return false;
+    let diff = 0;
+    for (let i = 0; i < header.length; i++) diff |= header.charCodeAt(i) ^ expected.charCodeAt(i);
+    return diff === 0;
+}
+
 /**
- * Register a Telegram bot: validate token, set webhook, store in Redis.
+ * Register a Telegram bot: validate token, set webhook, store in D1 (if userId + DB) or Redis.
  * Called from POST /telegram/setup
  */
 export async function setupTelegramBot(
     botToken: string,
     workerUrl: string,
-    env: Env
+    env: Env,
+    userId?: string
 ): Promise<TelegramBotConfig> {
     const bot = new TelegramBot(botToken);
 
@@ -927,37 +1033,55 @@ export async function setupTelegramBot(
         connectedAt: new Date().toISOString(),
     };
 
-    // Persist to Redis
+    const db = (env as { DB?: D1Database }).DB;
+    if (userId && db) {
+        await ensureTelegramConfigsTable(env);
+        await insertTelegramConfig(env, userId, config);
+        config.userId = userId;
+        console.log(`[Telegram Setup] Saved config for user ${userId} to D1 (@${config.username}).`);
+        return config;
+    }
+
+    // Fallback: Redis (legacy / no auth)
     const { getRedis } = await import("./memory");
     const redis = getRedis(env);
     console.log(`[Telegram Setup] Saving configuration for @${config.username} to Redis...`);
     await redis.set("tg:config", JSON.stringify(config));
     await redis.set("tg:enabled", "1");
-
-    // Double check if it was saved
     const verify = await redis.get("tg:config");
-    if (verify) {
-        console.log("[Telegram Setup] Verification successful: config exists in Redis.");
-    } else {
-        console.error("[Telegram Setup] ERROR: Config was NOT saved to Redis!");
-    }
-
+    if (verify) console.log("[Telegram Setup] Verification successful: config exists in Redis.");
+    else console.error("[Telegram Setup] ERROR: Config was NOT saved to Redis!");
     return config;
 }
 
 /**
- * Disconnect the Telegram bot: delete webhook, clear Redis config.
+ * Disconnect the Telegram bot: delete webhook, remove from D1 (if userId + DB) or Redis.
  */
-export async function disconnectTelegramBot(env: Env): Promise<void> {
+export async function disconnectTelegramBot(env: Env, userId?: string): Promise<void> {
+    const db = (env as { DB?: D1Database }).DB;
+
+    if (userId && db) {
+        const config = await getTelegramConfigByUserId(env, userId);
+        if (config) {
+            try {
+                const bot = new TelegramBot(config.token);
+                await bot.deleteWebhook().catch((err) => {
+                    console.error("[Telegram Disconnect] Failed to delete webhook from Telegram:", err);
+                });
+            } catch (_) { /* ignore */ }
+            await deleteTelegramConfigByUserId(env, userId);
+            console.log(`[Telegram Disconnect] Config removed from D1 for user ${userId}.`);
+        }
+        return;
+    }
+
     const { getRedis } = await import("./memory");
     const redis = getRedis(env);
-
     const raw = await redis.get("tg:config") as string | null;
     if (raw) {
         try {
             const config: TelegramBotConfig = JSON.parse(raw);
             const bot = new TelegramBot(config.token);
-            // We still want to clear the Redis config even if deleteWebhook fails
             await bot.deleteWebhook().catch((err) => {
                 console.error("[Telegram Disconnect] Failed to delete webhook from Telegram:", err);
             });
@@ -965,8 +1089,6 @@ export async function disconnectTelegramBot(env: Env): Promise<void> {
             console.error("[Telegram Disconnect] Failed to parse config from Redis:", err);
         }
     }
-
-    // Always clear these keys if they exist
     await redis.del("tg:config");
     await redis.del("tg:enabled");
     console.log("[Telegram Disconnect] Config cleared from Redis.");
@@ -1001,7 +1123,8 @@ export async function getTelegramConfig(env: Env): Promise<TelegramBotConfig | n
 
         // Fallback webhook URL: use UPSTASH_WORKFLOW_URL (public worker URL)
         // Using indexed access to avoid TS errors if WORKER_URL is not in Env type
-        const publicUrl = env.UPSTASH_WORKFLOW_URL || (env as any).WORKER_URL || "";
+        const rawUrl = env.UPSTASH_WORKFLOW_URL || (env as any).WORKER_URL || "";
+        const publicUrl = rawUrl.trim();
         const webhookUrl = publicUrl ? `${publicUrl.replace(/\/$/, "")}/telegram/webhook` : "";
 
         try {

@@ -39,8 +39,11 @@ import {
   setupTelegramBot,
   disconnectTelegramBot,
   getTelegramConfig,
+  getTelegramConfigBySecret,
+  getTelegramConfigByUserId,
   handleTelegramUpdate,
   verifyWebhookSecret,
+  verifyTelegramInternalSecret,
   TelegramBot
 } from "./telegram";
 
@@ -231,9 +234,14 @@ app.post("/task", async (c) => {
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const sessionId = body.sessionId ?? `session-${Date.now()}`;
 
-    const qstash = new QStashClient({ token: c.env.QSTASH_TOKEN });
+    const qstash = new QStashClient({
+      token: c.env.QSTASH_TOKEN,
+      baseUrl: c.env.QSTASH_URL,
+    });
+    const workflowBase = (c.env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+    if (!workflowBase) throw new Error("UPSTASH_WORKFLOW_URL must be set");
     await qstash.publishJSON({
-      url: `${c.env.UPSTASH_WORKFLOW_URL}/workflow`,
+      url: `${workflowBase}/workflow`,
       body: {
         taskId,
         sessionId,
@@ -569,16 +577,28 @@ app.post("/approvals/:id/decision", async (c) => {
 });
 
 // ─── Telegram API ─────────────────────────────────────────────────────────────
+// When X-User-Id + Authorization (internal secret) are present, use D1 per-user config.
+// Otherwise fall back to legacy Redis/env single-tenant.
+
+function getTelegramUserId(c: { req: { header: (n: string) => string | undefined }; env: Env }): string | null {
+  const secret = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+  if (!secret || !verifyTelegramInternalSecret(c.env, secret)) return null;
+  return c.req.header("X-User-Id")?.trim() ?? null;
+}
 
 app.get("/telegram/status", async (c) => {
   try {
-    const config = await getTelegramConfig(c.env);
+    const userId = getTelegramUserId(c);
+    const config = userId
+      ? await getTelegramConfigByUserId(c.env, userId)
+      : await getTelegramConfig(c.env);
     if (!config) return c.json({ connected: false });
 
     const bot = new TelegramBot(config.token);
     const webhookInfo = await bot.getWebhookInfo();
     const redis = getRedis(c.env);
-    const activityCount = await redis.llen("tg:activity");
+    const activityKey = config.userId ? `tg:activity:${config.userId}` : "tg:activity";
+    const activityCount = await redis.llen(activityKey);
 
     return c.json({
       connected: true,
@@ -600,19 +620,20 @@ app.get("/telegram/status", async (c) => {
 
 app.post("/telegram/setup", async (c) => {
   try {
-    const { botToken } = await c.req.json<{ botToken: string }>();
+    const body = await c.req.json<{ botToken: string; userId?: string }>();
+    const { botToken, userId } = body;
     if (!botToken) return c.json({ error: "botToken is required" }, 400);
 
-    // Use the public HTTPS URL from wrangler.toml for the webhook
-    const workerUrl = (c.env.WORKER_URL || c.env.UPSTASH_WORKFLOW_URL)?.replace(/\/$/, "");
-    console.log(`[Telegram Setup] Using Worker URL: ${workerUrl}`);
-
+    const rawWorker = c.env.WORKER_URL || c.env.UPSTASH_WORKFLOW_URL;
+    const workerUrl = rawWorker?.trim().replace(/\/$/, "");
     if (!workerUrl || !workerUrl.startsWith("https://")) {
-      console.error(`[Telegram Setup] ERROR: Invalid Worker URL: ${workerUrl}`);
-      throw new Error("UPSTASH_WORKFLOW_URL must be a valid HTTPS URL in wrangler.toml");
+      return c.json({ error: "UPSTASH_WORKFLOW_URL must be a valid HTTPS URL" }, 400);
     }
 
-    const config = await setupTelegramBot(botToken, workerUrl, c.env);
+    const authenticatedUserId = getTelegramUserId(c);
+    const effectiveUserId = (authenticatedUserId && userId === authenticatedUserId) ? userId : undefined;
+
+    const config = await setupTelegramBot(botToken, workerUrl, c.env, effectiveUserId ?? undefined);
 
     return c.json({
       success: true,
@@ -627,7 +648,8 @@ app.post("/telegram/setup", async (c) => {
 
 app.delete("/telegram/disconnect", async (c) => {
   try {
-    await disconnectTelegramBot(c.env);
+    const userId = getTelegramUserId(c);
+    await disconnectTelegramBot(c.env, userId ?? undefined);
     return c.json({ success: true });
   } catch (err) {
     return c.json({ error: String(err) }, 500);
@@ -637,7 +659,9 @@ app.delete("/telegram/disconnect", async (c) => {
 app.get("/telegram/activity", async (c) => {
   try {
     const redis = getRedis(c.env);
-    const raw = await redis.lrange("tg:activity", 0, 49) as string[];
+    const userId = getTelegramUserId(c);
+    const activityKey = userId ? `tg:activity:${userId}` : "tg:activity";
+    const raw = await redis.lrange(activityKey, 0, 49) as string[];
     const activity = raw.map((r: string) => {
       try { return JSON.parse(r); } catch { return null; }
     }).filter(Boolean);
@@ -648,23 +672,30 @@ app.get("/telegram/activity", async (c) => {
 });
 
 app.post("/telegram/webhook", async (c) => {
-  const config = await getTelegramConfig(c.env);
-  if (!config) {
-    console.error("[Telegram Webhook] Error: Bot not configured in Redis (tg:config missing)");
-    return c.json({ error: "Not configured" }, 400);
-  }
-
   const secretHeader = c.req.header("X-Telegram-Bot-Api-Secret-Token");
-  if (!verifyWebhookSecret(secretHeader || null, config.secret)) {
-    console.warn("[Telegram Webhook] Warning: Unauthorized secret token mismatch");
+  const config = secretHeader
+    ? await getTelegramConfigBySecret(c.env, secretHeader)
+    : null;
+  if (!config) {
+    const legacy = await getTelegramConfig(c.env);
+    if (!legacy) {
+      return c.json({ error: "Not configured" }, 400);
+    }
+    const ok = secretHeader ? verifyWebhookSecret(secretHeader, legacy.secret) : false;
+    if (!ok) return c.json({ error: "Unauthorized" }, 401);
+    try {
+      const update = await c.req.json();
+      c.executionCtx.waitUntil(handleTelegramUpdate(update, c.env, legacy));
+      return c.json({ ok: true });
+    } catch {
+      return c.json({ error: "Invalid JSON" }, 400);
+    }
+  }
+  if (!verifyWebhookSecret(secretHeader ?? null, config.secret)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
-
   try {
     const update = await c.req.json();
-    console.log(`[Telegram Webhook] Received update ID ${update.update_id}`);
-
-    // Handle in background
     c.executionCtx.waitUntil(handleTelegramUpdate(update, c.env, config));
     return c.json({ ok: true });
   } catch (err) {
@@ -676,14 +707,17 @@ app.post("/telegram/webhook", async (c) => {
 // ─── Upstash Workflow Handler ─────────────────────────────────────────────────
 app.post("/workflow", async (c) => {
   const handler = serve<WorkflowPayload>(workflowHandler, {
-    qstashClient: new QStashClient({ token: c.env.QSTASH_TOKEN }),
+    qstashClient: new QStashClient({
+      token: c.env.QSTASH_TOKEN,
+      baseUrl: c.env.QSTASH_URL,
+    }),
     receiver: new Receiver({
       currentSigningKey: c.env.QSTASH_CURRENT_SIGNING_KEY,
       nextSigningKey: c.env.QSTASH_NEXT_SIGNING_KEY,
     }),
     baseUrl: c.env.UPSTASH_WORKFLOW_URL,
     env: {
-      QSTASH_URL: "https://qstash.upstash.io",
+      QSTASH_URL: c.env.QSTASH_URL,
       QSTASH_TOKEN: c.env.QSTASH_TOKEN,
       UPSTASH_REDIS_REST_URL: c.env.UPSTASH_REDIS_REST_URL,
       UPSTASH_REDIS_REST_TOKEN: c.env.UPSTASH_REDIS_REST_TOKEN,

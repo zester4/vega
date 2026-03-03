@@ -30,6 +30,7 @@ interface Env {
   QSTASH_TOKEN: string;  // Upstash QStash API token
   QSTASH_CURRENT_SIGNING_KEY: string;  // QStash signature verification
   QSTASH_NEXT_SIGNING_KEY: string;  // QStash signature rotation
+  QSTASH_URL: string;  // Regional QStash base URL (e.g. https://qstash-us-east-1.upstash.io)
 
   // ── Redis (Memory & State) ────────────────────────────────────────────────
   UPSTASH_REDIS_REST_URL: string;  // Upstash Redis REST URL
@@ -55,4 +56,8 @@ interface Env {
 
   // ── Cloudflare Bindings ────────────────────────────────────────────────────
   FILES_BUCKET: vega_agent_files;              // R2 bucket for persistent file storage
+  DB: D1Database;                              // D1 for telegram_configs (per-user bot tokens)
+
+  // ── Internal (Next.js ↔ Worker) ───────────────────────────────────────────
+  TELEGRAM_INTERNAL_SECRET?: string;          // Shared secret for /telegram/* from Next.js (wrangler secret)
 }

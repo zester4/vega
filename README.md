@@ -1,194 +1,206 @@
-# 🤖 Autonomous AI Agent
+# VEGA — Autonomous AI Agent
 
-A powerful, self-aware AI agent built on **Cloudflare Workers** + **Gemini 3 Flash** with persistent memory, tool calling, durable workflows, and self-scheduling.
+Production-ready AI agent: **Next.js** (Vercel) for the app and auth, **Cloudflare Worker** for the agent, with **Neon** (Postgres), **D1** (Telegram configs), **Redis**, and **QStash**.
 
 ---
 
 ## Architecture
 
+- **Next.js (Vercel)** — App UI, auth (Better Auth + Drizzle + Neon), `/api/*` proxies to Worker. Chat and settings are session-aware; chat history is **persistent per user** when logged in.
+- **Cloudflare Worker** — Agent brain (Gemini), tools, workflows, Telegram webhook. Uses Redis (sessions/history), D1 (per-user Telegram bot configs), QStash (cron + workflows).
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Cloudflare Worker (Edge)                  │
-│                                                             │
-│  POST /chat        → Agent Brain (Gemini + Tool Loop)       │
-│  POST /task        → Queue long-running workflow            │
-│  GET  /task/:id    → Check task status                      │
-│  POST /workflow    → Upstash Workflow (durable steps)       │
-│  POST /cron/tick   → QStash periodic heartbeat              │
-│  GET  /health      → Health check                           │
-└──────────────┬──────────────────────────────────────────────┘
-               │
-       ┌───────┴────────┐
-       │                │
-  ┌────▼─────┐    ┌─────▼──────────────┐
-  │ Upstash  │    │    Upstash         │
-  │  Redis   │    │    Workflow        │
-  │ (Memory) │    │  (Durable Tasks)   │
-  └──────────┘    └─────────────────────┘
-                         │
-                  ┌──────▼──────┐
-                  │   QStash    │
-                  │  (Cron +    │
-                  │  Messaging) │
-                  └─────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Next.js (Vercel)                                                        │
+│  /sign-in, /sign-up, /chat, /settings, /api/auth/*, /api/chat, /api/…   │
+│  Better Auth + Drizzle → Neon Postgres                                   │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │ proxy (WORKER_URL)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Cloudflare Worker                                                       │
+│  POST /chat, /task, /workflow, /telegram/webhook, /cron/tick, …         │
+│  Redis (sessions, history) · D1 (telegram_configs) · QStash              │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-agent/
-├── src/
-│   ├── index.ts          # Cloudflare Worker + Hono router
-│   ├── agent.ts          # Agent brain (think → tool → chat loop)
-│   ├── gemini.ts         # Gemini AI client (thinking, chat, tools, vision)
-│   ├── memory.ts         # Redis state (sessions, history, tasks, tools)
-│   ├── tools/
-│   │   └── builtins.ts   # Built-in tools (fetch, schedule, workflow, memory)
-│   └── routes/
-│       └── workflow.ts   # Upstash Workflow durable pipeline
-├── wrangler.toml  
-|__ cli.ts        # Cloudflare Worker config
-├── worker-configuration.d.ts  # Env bindings types
-├── tsconfig.json
-├── package.json
-└── .dev.vars             # Local dev secrets (never commit!)
+├── app/                    # Next.js App Router
+│   ├── (auth)/sign-in, sign-up
+│   ├── api/auth/[...all]/  # Better Auth
+│   ├── api/chat/           # Proxy → Worker (injects user sessionId when logged in)
+│   ├── api/telegram/       # Proxy → Worker (session + internal secret)
+│   ├── chat/, settings/, playground/, …
+│   └── layout.tsx
+├── lib/                    # Next.js shared
+│   ├── auth.ts             # Better Auth (Drizzle + Neon)
+│   ├── auth-client.ts
+│   ├── db.ts               # Drizzle + Neon
+│   └── db/schema.ts        # Better Auth tables (user, session, account, verification)
+├── src/                    # Cloudflare Worker
+│   ├── index.ts            # Hono routes
+│   ├── agent.ts, gemini.ts, memory.ts
+│   ├── telegram.ts
+│   ├── db/schema.ts        # D1 table names + DDL (telegram_configs)
+│   ├── db/queries.ts       # D1 queries
+│   └── tools/, routes/
+├── drizzle/                # Drizzle migrations (from lib/db/schema.ts)
+├── migrations/             # D1 SQL (telegram_configs)
+├── wrangler.toml
+├── drizzle.config.ts
+└── package.json
 ```
+
+---
+
+## Scripts
+
+| Script | Purpose |
+|--------|--------|
+| `npm run dev` | Next.js dev server |
+| `npm run local` | Run Worker locally (wrangler dev) |
+| `npm run build` | **Runs `db:migrate` then `next build`** — requires `NEON_DATABASE_URL` for migrations |
+| `npm run db:generate` | Generate Drizzle migrations from `lib/db/schema.ts` |
+| `npm run db:migrate` | Apply Drizzle migrations to Neon |
+| `npm run db:push` | Push schema to Neon without migration files (dev) |
+| `npm run deploy` | Deploy Worker to Cloudflare |
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Install
+
 ```bash
 npm install
 ```
 
-### 2. Get your credentials
+### 2. Next.js (Vercel) — Auth & DB
 
-| Service | Where to get it |
-|---------|----------------|
-| **Gemini API Key** | [aistudio.google.com](https://aistudio.google.com) |
-| **QStash Token + Signing Keys** | [console.upstash.com → QStash](https://console.upstash.com) |
-| **Redis URL + Token** | [console.upstash.com → Redis](https://console.upstash.com) |
+- **Neon**: Create a Postgres database at [neon.tech](https://neon.tech), copy the connection string.
+- **Better Auth**: Generate a secret, e.g. `openssl rand -base64 32`.
 
-### 3. Fill in `.dev.vars` for local dev
+Create `.env.local` (or set in Vercel):
+
 ```env
-QSTASH_TOKEN=...
-QSTASH_CURRENT_SIGNING_KEY=...
-QSTASH_NEXT_SIGNING_KEY=...
-UPSTASH_REDIS_REST_URL=...
-UPSTASH_REDIS_REST_TOKEN=...
-GEMINI_API_KEY=...
-SERPER_API_KEY=...
+NEON_DATABASE_URL=postgresql://...?sslmode=require
+BETTER_AUTH_SECRET=<your-secret>
+BETTER_AUTH_API_KEY=<from-dash.better-auth.com-create-project>
+BETTER_AUTH_URL=https://your-app.vercel.app
+WORKER_URL=https://your-worker.workers.dev
+TELEGRAM_INTERNAL_SECRET=<shared-secret-with-worker>
 ```
 
-### 4. Update `wrangler.toml`
-Set `UPSTASH_WORKFLOW_URL` to your deployed worker URL.
+**Vercel**: Set the same vars in the project (Environment Variables). You need at least: `NEON_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_API_KEY`, `WORKER_URL`, `TELEGRAM_INTERNAL_SECRET`. Optional: `BETTER_AUTH_URL` (your deployed app URL, e.g. `https://vega-ebon.vercel.app`) to fix redirect/callback URLs.
 
-### 5. Run locally
+- **Better Auth dashboard**: Install `@better-auth/infra`, add the `dash()` plugin in `lib/auth.ts`, then create a project at [dash.better-auth.com](https://dash.better-auth.com). Set `BETTER_AUTH_API_KEY` to the key shown there. In “Connect Your App” use your deployed URL (e.g. `https://vega-ebon.vercel.app`) and path `/api/auth`.
+
+- Run migrations once (or let `npm run build` do it):
+
 ```bash
-npm run dev
-```
-> For local workflow testing, use [Upstash Workflow local dev server](https://upstash.com/docs/qstash/workflow/local-development).
-
-### 6. Deploy to Cloudflare
-```bash
-npm run deploy
+npm run db:generate   # only if you change lib/db/schema.ts
+npm run db:migrate
 ```
 
-Then set secrets via Wrangler:
+### 3. Cloudflare Worker — env and D1
+
+- **wrangler.toml**: Set `WORKER_URL`, `UPSTASH_WORKFLOW_URL`, `QSTASH_URL` (e.g. `https://qstash-us-east-1.upstash.io`).
+- Create D1 and bind it:
+
 ```bash
-wrangler secret put GEMINI_API_KEY
-wrangler secret put QSTASH_TOKEN
-wrangler secret put QSTASH_CURRENT_SIGNING_KEY
-wrangler secret put QSTASH_NEXT_SIGNING_KEY
-wrangler secret put UPSTASH_REDIS_REST_URL
-wrangler secret put UPSTASH_REDIS_REST_TOKEN
-wrangler secret put SERPER_API_KEY
+npx wrangler d1 create vega-d1
 ```
 
-### 7. Set up the cron heartbeat (optional)
-After deploying, create a QStash schedule to call `/cron/tick` periodically:
+Put the returned `database_id` in `wrangler.toml` under `[[d1_databases]]`. Then apply the D1 schema:
+
 ```bash
-curl -X POST https://qstash.upstash.io/v2/schedules/https://YOUR_WORKER.workers.dev/cron/tick \
-  -H "Authorization: Bearer $QSTASH_TOKEN" \
-  -H "Upstash-Cron: 0 * * * *"
+npx wrangler d1 execute vega-d1 --remote --file=./migrations/0000_telegram_configs.sql
 ```
+
+- Set secrets (Worker):
+
+```bash
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put QSTASH_TOKEN
+npx wrangler secret put QSTASH_CURRENT_SIGNING_KEY
+npx wrangler secret put QSTASH_NEXT_SIGNING_KEY
+npx wrangler secret put UPSTASH_REDIS_REST_URL
+npx wrangler secret put UPSTASH_REDIS_REST_TOKEN
+npx wrangler secret put QSTASH_URL
+npx wrangler secret put TELEGRAM_INTERNAL_SECRET
+```
+
+Use the **same** `TELEGRAM_INTERNAL_SECRET` value in Vercel (Next.js) and in the Worker so the Telegram proxy can authenticate to the Worker.
+
+### 4. Run locally
+
+- Terminal 1: `npm run local` (Worker).
+- Terminal 2: `npm run dev` (Next.js). Set `WORKER_URL=http://127.0.0.1:8787` in `.env.local`.
 
 ---
 
-## API Reference
+## Production (Vercel + Cloudflare)
 
-### `POST /chat` — Conversational Agent
-```json
-{
-  "message": "Fetch https://example.com and summarize it",
-  "sessionId": "user-123",
-  "thinkingLevel": "LOW"
-}
-```
-Response:
-```json
-{
-  "reply": "Here's the summary...",
-  "sessionId": "user-123"
-}
-```
+- **Vercel**: Deploy the Next.js app. Set env vars: `NEON_DATABASE_URL`, `BETTER_AUTH_SECRET`, `WORKER_URL` (your deployed Worker URL), `TELEGRAM_INTERNAL_SECRET`.
+- **Build**: `npm run build` runs `db:migrate` then `next build`. Ensure `NEON_DATABASE_URL` is set in Vercel so migrations apply.
+- **Cloudflare**: Deploy the Worker (`npm run deploy`). Ensure all secrets and `QSTASH_URL` (regional) are set so spawn/cron and Telegram work.
 
-### `POST /task` — Long-Running Task
-```json
-{
-  "taskType": "research",
-  "instructions": "Research the latest AI papers on chain-of-thought prompting",
-  "sessionId": "user-123"
-}
-```
-Response:
-```json
-{
-  "success": true,
-  "taskId": "task-1234567890-abc123",
-  "message": "Task queued. Poll /task/:id for status."
-}
-```
+Everything works when:
 
-### `GET /task/:id` — Task Status
-```json
-{
-  "id": "task-1234567890-abc123",
-  "status": "done",
-  "result": {
-    "summary": "...",
-    "steps": ["Step 1: ...", "Step 2: ..."]
-  }
-}
-```
+- Next.js can reach the Worker at `WORKER_URL` and shares `TELEGRAM_INTERNAL_SECRET`.
+- Worker has Neon (not used by Worker), D1 and Redis bindings, and QStash/Redis secrets with **regional** `QSTASH_URL` (e.g. `https://qstash-us-east-1.upstash.io`).
 
 ---
 
-## Built-in Agent Tools
+## Auth and pages
 
-| Tool | What it does |
+- **Sign up / Sign in**: `/sign-up`, `/sign-in` (email + password). Session is cookie-based.
+- **Settings** (`/settings`): Protected; redirects to `/sign-in` if not logged in. Users can connect their **Telegram bot** (token stored per user in D1).
+- **Chat** (`/chat`): **Requires sign-in.** Redirects to `/sign-in?callbackURL=/chat` if not logged in. Chat history is **persistent per user** (sessionId is set to `user-{id}` in the API).
+
+---
+
+## Telegram bot
+
+- Each user can connect **one bot** from Settings (token stored in D1, keyed by user).
+- Telegram sends updates to the **Worker** URL (`/telegram/webhook`). The Worker resolves the bot by `X-Telegram-Bot-Api-Secret-Token` from D1 and processes the update.
+- The bot works well when: D1 is created and bound, `TELEGRAM_INTERNAL_SECRET` is set on both Next.js and Worker, and the Worker URL is reachable from the internet.
+
+---
+
+## API (Worker)
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /chat` | Agent chat; body can include `sessionId` (Next.js sets `user-{id}` when logged in). |
+| `POST /task` | Queue long-running task. |
+| `GET /task/:id` | Task status. |
+| `POST /workflow` | Upstash Workflow (durable). |
+| `POST /telegram/webhook` | Telegram webhook (resolve bot by secret from D1). |
+| `POST /cron/tick` | QStash cron heartbeat. |
+
+---
+
+## Built-in tools (examples)
+
+| Tool | Description |
 |------|-------------|
-| `fetch_url` | HTTP GET/POST any public URL |
-| `schedule_cron` | Create QStash cron jobs (self-scheduling) |
-| `trigger_workflow` | Launch durable long-running pipelines |
-| `store_memory` | Persist key-value data to Redis |
-| `recall_memory` | Retrieve stored data by key |
-| `create_tool` | Dynamically register new tools at runtime |
+| `web_search` | Web search. |
+| `schedule_cron` | Create QStash cron jobs. |
+| `trigger_workflow` | Launch durable workflows. |
+| `spawn_agent` | Spawn sub-agents (uses QStash; requires correct `QSTASH_URL`). |
+| `store_memory` / `recall_memory` | Redis key-value memory. |
+| `create_tool` | Register new tools at runtime. |
 
 ---
 
-## Gemini Features Used
+## Summary
 
-| Feature | How |
-|---------|-----|
-| **Thinking (Low/High)** | `thinkingConfig.thinkingLevel` |
-| **Tool calling** | `functionDeclarations` in config |
-| **Multi-turn chat** | `ai.chats.create()` with history |
-| **Vision** | `inlineData` with base64 image |
-| **System prompts** | `systemInstruction` in config |
-
-Model: `gemini-3-flash-preview` throughout.
+- **Build**: `npm run build` = `db:migrate` + `next build`; Drizzle generates SQL from `lib/db/schema.ts` via `db:generate`.
+- **Vercel**: Set `NEON_DATABASE_URL`, `BETTER_AUTH_SECRET`, `WORKER_URL`, `TELEGRAM_INTERNAL_SECRET`; deploy; migrations run on build.
+- **Chat**: Persistent per user when logged in (API injects `user-{id}` as `sessionId`).
+- **Bot**: Per-user Telegram config in D1; webhook on Worker; works when D1 and shared secret are configured.

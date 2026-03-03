@@ -1,28 +1,44 @@
-//app/api/chat/route.ts
+// app/api/chat/route.ts
 import { NextRequest } from "next/server";
+import { auth } from "@/lib/auth";
+import { headers } from "next/headers";
 
 /**
- * Proxy route: keeps the CF Worker URL (ngrok or deployed) server-side only.
- * Set WORKER_URL in .env.local:
- *   WORKER_URL=https://YOUR-NGROK-ID.ngrok-free.app   (local dev)
- *   WORKER_URL=https://autonomous-ai-agent.YOUR.workers.dev  (production)
- * 
- * Supports both regular JSON responses and streaming SSE responses.
+ * Proxy to Worker /chat. Keeps WORKER_URL server-side only.
+ * When the user is logged in, sessionId is set to user-{id} so chat history
+ * is persistent per user across devices and sessions.
  */
+function getWorkerBaseUrl(): string {
+  const raw = (process.env.WORKER_URL ?? "http://127.0.0.1:8787").trim();
+  const firstLine = raw.split(/\r?\n/)[0]?.trim() ?? raw;
+  const base = firstLine.replace(/\/+$/, "");
+  try {
+    return new URL(base).origin;
+  } catch {
+    return base || "http://127.0.0.1:8787";
+  }
+}
+
 export async function POST(req: NextRequest) {
-  const workerUrl = process.env.WORKER_URL ?? "http://127.0.0.1:8787";
+  const workerBase = getWorkerBaseUrl();
 
   try {
-    const body = await req.json();
-    const stream = req.headers.get("x-stream") === "true";
+    const session = await auth.api.getSession({ headers: await headers() });
+    if (!session?.user?.id) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    const res = await fetch(`${workerUrl}/chat`, {
+    const body = (await req.json()) as Record<string, unknown>;
+    const stream = req.headers.get("x-stream") === "true";
+    body.sessionId = `user-${session.user.id}`;
+
+    const res = await fetch(`${workerBase}/chat`, {
       method: "POST",
       headers: { 
         "Content-Type": "application/json",
         ...(stream && { "x-stream": "true" }),
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body as Record<string, unknown>),
     });
 
     // If streaming is requested and the response is streaming, pass through

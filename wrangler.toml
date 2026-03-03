@@ -9,6 +9,16 @@ compatibility_flags = ["nodejs_compat"]
 WORKER_URL = "https://autonomous-ai-agent.adesrnd.workers.dev"
 UPSTASH_WORKFLOW_URL = "https://autonomous-ai-agent.adesrnd.workers.dev" # Must be worker for Upstash
 BRIDGE_URL = "https://vega-ebon.vercel.app" # Next.js bridge (Vercel) for local-fs and other API routes
+QSTASH_URL = "https://qstash-us-east-1.upstash.io" # Regional QStash; use same region as your Upstash project
+# ─── D1 (Telegram configs per user) ─────────────────────────────────────────────
+# 1. Create DB:  npx wrangler d1 create vega-d1
+# 2. Copy the returned database_id into the line below (replace the zeros)
+# 3. Apply schema:  npx wrangler d1 execute vega-d1 --remote --file=./migrations/0000_telegram_configs.sql
+[[d1_databases]]
+binding         = "DB"
+database_name   = "vega-d1"
+database_id     = "b72e0170-75aa-42c1-8194-7f4588d3dee1"
+
 # ─── R2 File Storage ──────────────────────────────────────────────────────────
 # Create bucket first: wrangler r2 bucket create vega-agent-files
 [[r2_buckets]]

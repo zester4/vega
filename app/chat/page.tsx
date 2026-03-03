@@ -341,11 +341,30 @@ function CopyButton({ text }: { text: string }) {
 // This inline version handles bold, inline code, and headers.
 
 function isImageUrl(url: string): boolean {
-  // Match R2 worker URLs like https://*.workers.dev/files/generated/...
-  if (/workers\.dev\/files\/generated\//.test(url)) return true;
+  const u = url.trim().split(/\s/)[0] ?? url;
+  // Match R2/worker file URLs: .../files/generated/... or .../files/...
+  if (/\/files\/(generated\/)?[^\s]+/.test(u)) return true;
+  if (/workers\.dev\/files\//.test(u)) return true;
   // Match common image extensions
-  if (/\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(url)) return true;
+  if (/\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(u)) return true;
   return false;
+}
+
+/** Extract image URLs from generate_image tool results for display as <img> */
+function getGeneratedImageUrls(tools: ToolCall[] | undefined): Array<{ url: string; alt: string }> {
+  if (!tools?.length) return [];
+  const out: Array<{ url: string; alt: string }> = [];
+  for (const t of tools) {
+    if (t.name !== "generate_image" || t.status !== "completed" || !t.output) continue;
+    const o = t.output as Record<string, unknown>;
+    const url = typeof o.imageUrl === "string" ? o.imageUrl.trim() : "";
+    if (!url.startsWith("http")) continue;
+    out.push({
+      url,
+      alt: (typeof o.description === "string" ? o.description : "Generated image") || "Generated image",
+    });
+  }
+  return out;
 }
 
 function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: string }) {
@@ -942,6 +961,10 @@ function ChatPageContent() {
                 {msg.tools && msg.tools.length > 0 && (
                   <ToolStream tools={msg.tools} />
                 )}
+                {/* Generated images from tools (display as <img>, not links) */}
+                {getGeneratedImageUrls(msg.tools).map((img, i) => (
+                  <InlineImage key={`img-${i}`} url={img.url} alt={img.alt} />
+                ))}
                 {/* Response body */}
                 <div className="flex items-start gap-2 sm:gap-2.5">
                   <div className="border-l-2 border-[#00e5cc]/40 pl-3 py-0.5 text-[11px] sm:text-xs text-[#e8e8ea]/90 flex-1">
