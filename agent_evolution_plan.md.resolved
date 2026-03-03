@@ -1,0 +1,34 @@
+# VEGA Approved Evolution Roadmap
+
+This plan contains only the high-priority tools and features explicitly approved for implementation.
+
+---
+
+## 🛠️ Approved Power Tools
+*Specialized capabilities to expand VEGA's reach.*
+
+1.  **`query_knowledge_graph`**: Query structured data (e.g., Wikidata, WolframAlpha) for verifiable facts to prevent hallucinations.
+2.  **`zapier_bridge`**: Direct integration with Zapier's 6000+ apps for deep workflow connectivity.
+3.  **`social_media_manager`**: Post and monitor engagement on X (Twitter), LinkedIn, and Instagram.
+4.  **`docker_sandbox`**: Spin up temporary, isolated Docker containers for running complex software or multi-file code projects.
+5.  **`cloud_resource_manager`**: Provision/Destroy temporary Cloudflare R2 buckets, KV pairs, or D1 databases.
+6.  **`sql_wizard`**: Generate and execute complex SQL queries across the user's D1/SQL databases.
+    > [!IMPORTANT]
+    > **ALWAYS SEEK APPROVAL** before executing any SQL queries.
+
+---
+
+## ✨ Approved Elite Features
+*Architectural upgrades for enhanced autonomy and intelligence.*
+
+1.  **Self-Healing Workflows**: Workflows that detect their own failures (e.g., API down) and automatically try alternative tools or paths.
+2.  **Autonomous Reflection Loop**: Periodic review of "Active Goals" and "Stored Memories" to find optimizations or missed tasks.
+3.  **Tool Invention Engine**: VEGA can write its own code-based tools and test them in a sandbox.
+    > [!IMPORTANT]
+    > **PROMPT USERS FIRST** before registering any self-invented tools.
+4.  **Graph-Based Memory**: Linked memories (e.g., "User" -> "owns" -> "Project X") for complex relational reasoning.
+5.  **Durable SSE Resumption**: Automatic UI reconnection for long-running tasks, ensuring the stream resumes exactly where it stopped.
+6.  **Proactive "Nudge" System**: Follow up on stale tasks or missing information (e.g., "Waiting for the API key you mentioned").
+7.  **Internal Knowledge Distillation**: Periodic "compression" of large conversation logs into concise "Knowledge Items" (KIs).
+8.  **Human-Agent Synergy**: Clearly identifying blockages and asking specific, multiple-choice questions to the user.
+9.  **Goal Milestones (Visualization)**: Progress bars for long-term goals displayed in the Telegram or Web UI.

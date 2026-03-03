@@ -1,5 +1,5 @@
 /**
- * gemini.ts — Core Gemini AI client
+ * src/gemini.ts — Core Gemini AI client
  * Wraps @google/genai with thinking, multi-turn chat, tool calling, and vision.
  *
  * Thinking API facts (gemini-3-flash-preview):
@@ -11,7 +11,7 @@
  */
 import { GoogleGenAI, Type } from "@google/genai";
 
-export const MODEL = "gemini-2.5-flash";
+export const MODEL = "gemini-3.1-flash-lite-preview";
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 let _ai: GoogleGenAI | null = null;
