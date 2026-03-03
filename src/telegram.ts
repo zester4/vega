@@ -805,55 +805,55 @@ async function processMessage(
             .trim();
     }
 
-    // ── Check voice mode preference ──────────────────────────────────────────────
+    // ── Send final reply (as text or voice) ──────────────────────────────────────
+    // 1. Split Markdown into chunks that will likely fit in 4096-char HTML messages
+    const replyChunks = splitMessage(reply, 3800);
     const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
 
-    if (voiceEnabled && reply.length > 0 && reply.length <= 2000) {
-        // Send voice reply using ElevenLabs TTS
-        try {
-            await bot.sendChatAction(chatId, "upload_document");
-            const { generateSpeechBytes } = await import("./tools/voice");
-            const audioBytes = await generateSpeechBytes(reply, env);
+    for (let i = 0; i < replyChunks.length; i++) {
+        const chunk = replyChunks[i];
+        const formatted = markdownToHtml(chunk);
 
-            if (audioBytes) {
-                // Send text first (for accessibility / fallback)
-                const formatted = markdownToHtml(reply);
-                await bot.sendMessage(chatId, formatted, {
-                    parse_mode: "HTML",
-                    reply_to_message_id: msg.message_id,
-                    disable_web_page_preview: true,
-                });
-                // Then send voice
-                await bot.sendVoice(chatId, audioBytes, {
-                    reply_to_message_id: msg.message_id,
-                    caption: "🎙️ Voice reply",
-                });
-            } else {
-                // Fallback to text if TTS fails
-                const formatted = markdownToHtml(reply);
+        // Only use voice if it's the only chunk and within reasonable length
+        if (i === 0 && replyChunks.length === 1 && voiceEnabled && reply.length <= 2000) {
+            try {
+                await bot.sendChatAction(chatId, "upload_document");
+                const { generateSpeechBytes } = await import("./tools/voice");
+                const audioBytes = await generateSpeechBytes(reply, env);
+
+                if (audioBytes) {
+                    await bot.sendMessage(chatId, formatted, {
+                        parse_mode: "HTML",
+                        reply_to_message_id: msg.message_id,
+                        disable_web_page_preview: true,
+                    });
+                    await bot.sendVoice(chatId, audioBytes, {
+                        reply_to_message_id: msg.message_id,
+                        caption: "🎙️ Voice reply",
+                    });
+                } else {
+                    await bot.sendMessage(chatId, formatted, {
+                        parse_mode: "HTML",
+                        reply_to_message_id: msg.message_id,
+                        disable_web_page_preview: true,
+                    });
+                }
+            } catch (ttsErr) {
+                console.error("[Telegram TTS] Failed:", ttsErr);
                 await bot.sendMessage(chatId, formatted, {
                     parse_mode: "HTML",
                     reply_to_message_id: msg.message_id,
                     disable_web_page_preview: true,
                 });
             }
-        } catch (ttsErr) {
-            console.error("[Telegram TTS] Failed:", ttsErr);
-            const formatted = markdownToHtml(reply);
+        } else {
+            // Regular text chunk delivery
             await bot.sendMessage(chatId, formatted, {
                 parse_mode: "HTML",
                 reply_to_message_id: msg.message_id,
                 disable_web_page_preview: true,
             });
         }
-    } else {
-        // Regular text reply
-        const formatted = markdownToHtml(reply);
-        await bot.sendMessage(chatId, formatted, {
-            parse_mode: "HTML",
-            reply_to_message_id: msg.message_id,
-            disable_web_page_preview: true,
-        });
     }
 
     // ── Send generated images as Telegram photos ─────────────────────────────────
@@ -862,15 +862,17 @@ async function processMessage(
             try {
                 await bot.sendChatAction(chatId, "upload_photo");
                 const imgRes = await fetch(img.url);
-                if (!imgRes.ok) {
-                    console.error(`[Telegram Image] Failed to fetch image: ${imgRes.status}`);
-                    continue;
-                }
+                if (!imgRes.ok) throw new Error(`Fetch status ${imgRes.status}`);
+
                 const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
-                const caption = img.description.length > 1024
-                    ? img.description.slice(0, 1021) + "..."
+
+                // Truncate description for caption limit (1024 chars), ensure HTML is safe
+                const rawCaption = img.description.length > 500
+                    ? img.description.slice(0, 497) + "..."
                     : img.description;
-                await bot.sendPhoto(chatId, imageBytes, caption);
+                const htmlCaption = markdownToHtml(rawCaption);
+
+                await bot.sendPhoto(chatId, imageBytes, htmlCaption);
             } catch (imgErr) {
                 console.error("[Telegram Image] Failed to send photo:", imgErr);
             }
@@ -1110,55 +1112,58 @@ export function verifyWebhookSecret(
  * Everything else must be escaped.
  */
 export function markdownToHtml(text: string): string {
-    // 1. Escape HTML special chars in the raw text first
-    //    We'll re-add tags intentionally below
-    let result = text;
+    const placeholders: Map<string, string> = new Map();
+    let placeholderCounter = 0;
 
-    // 2. Code blocks (``` ... ```) — must be done before inline code
-    result = result.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
-        return `<pre><code>${escapeHtml(code.trim())}</code></pre>`;
+    // 1. Protect Code Blocks (``` ... ```)
+    let result = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
+        const id = `\x00CODE_${placeholderCounter++}\x00`;
+        placeholders.set(id, `<pre><code>${escapeHtml(code.trim())}</code></pre>`);
+        return id;
     });
 
-    // 3. Inline code (`code`)
+    // 2. Protect Inline Code (`code`) — exclude already replaced blocks
     result = result.replace(/`([^`\n]+)`/g, (_, code) => {
-        return `<code>${escapeHtml(code)}</code>`;
+        const id = `\x00CODE_${placeholderCounter++}\x00`;
+        placeholders.set(id, `<code>${escapeHtml(code)}</code>`);
+        return id;
     });
 
-    // 4. Bold: **text** or __text__
+    // 3. Escape raw HTML special chars in the remaining prose
+    result = escapeHtml(result);
+
+    // 4. Apply non-code Markdown rules to the escaped prose
+    // Headers (h1–h3 → bold line)
+    result = result.replace(/^#{1,3}\s+(.+)$/gm, "<b>$1</b>");
+
+    // Bold: **text** or __text__
     result = result.replace(/\*\*(.+?)\*\*/gs, "<b>$1</b>");
     result = result.replace(/__(.+?)__/gs, "<b>$1</b>");
 
-    // 5. Italic: *text* or _text_ (single)
-    result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "<i>$1</i>");
-    result = result.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, "<i>$1</i>");
+    // Italic: *text* or _text_ (single)
+    // We use more restrictive regex to avoid matching across multiple lines unnecessarily
+    result = result.replace(/(?<!\*)\*(?!\*)([^\*\n]+?)(?<!\*)\*(?!\*)/g, "<i>$1</i>");
+    result = result.replace(/(?<!_)_(?!_)([^_\n]+?)(?<!_)_(?!_)/g, "<i>$1</i>");
 
-    // 6. Strikethrough: ~~text~~
+    // Strikethrough: ~~text~~
     result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-    // 7. Links: [text](url)
+    // Links: [text](url)
     result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
-    // 8. Headers (h1–h3 → bold line)
-    result = result.replace(/^#{1,3}\s+(.+)$/gm, "<b>$1</b>");
-
-    // 9. Horizontal rules
+    // Horizontal rules
     result = result.replace(/^[-*_]{3,}$/gm, "─────────────");
 
-    // 10. Bullet lists
+    // Bullet lists
     result = result.replace(/^[\-\*\+]\s+(.+)$/gm, "• $1");
 
-    // 11. Numbered lists — keep as-is (Telegram renders plain text fine)
-
-    // 12. Blockquotes
+    // Blockquotes
     result = result.replace(/^>\s*(.+)$/gm, "<i>│ $1</i>");
 
-    // 13. Escape any raw HTML angle brackets that aren't our intentional tags
-    //     (already escaped above via escapeHtml in code blocks — but protect
-    //      stray < > in normal prose)
-    // This is tricky — only escape chars that aren't part of our allowed tags
-    // Simplest safe approach: only the code sections were escaped; the rest
-    // might have user-generated < > — wrap any remaining untagged < > 
-    result = result.replace(/<(?!\/?(?:b|i|u|s|code|pre|a)[> /])/g, "&lt;");
+    // 5. Restore code segments from placeholders
+    placeholders.forEach((html, id) => {
+        result = result.replace(id, html);
+    });
 
     return result.trim();
 }
@@ -1175,24 +1180,32 @@ export function escapeHtml(text: string): string {
 }
 
 /**
- * Split a message into chunks at paragraph boundaries, respecting max length.
+ * Split a message into chunks at paragraph or newline boundaries, respecting max length.
+ * Attempt to be extremely conservative to avoid splitting in the middle of a tag.
  */
 function splitMessage(text: string, maxLen: number): string[] {
     if (text.length <= maxLen) return [text];
 
     const chunks: string[] = [];
-    const paragraphs = text.split("\n\n");
-    let current = "";
+    let remaining = text;
 
-    for (const para of paragraphs) {
-        if ((current + "\n\n" + para).length > maxLen) {
-            if (current) chunks.push(current.trim());
-            current = para;
-        } else {
-            current = current ? current + "\n\n" + para : para;
+    while (remaining.length > 0) {
+        if (remaining.length <= maxLen) {
+            chunks.push(remaining);
+            break;
         }
+
+        // Try to find a good break point: double newline, then single newline, then space
+        let splitIdx = remaining.lastIndexOf("\n\n", maxLen);
+        if (splitIdx === -1) splitIdx = remaining.lastIndexOf("\n", maxLen);
+        if (splitIdx === -1) splitIdx = remaining.lastIndexOf(" ", maxLen);
+
+        // If no good break point found, hard split at maxLen
+        if (splitIdx === -1) splitIdx = maxLen;
+
+        chunks.push(remaining.slice(0, splitIdx).trim());
+        remaining = remaining.slice(splitIdx).trim();
     }
-    if (current) chunks.push(current.trim());
 
     return chunks.filter((c) => c.length > 0);
 }

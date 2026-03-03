@@ -77,6 +77,31 @@ app.get("/health", (c) =>
   })
 );
 
+// ─── File Serving (R2) ────────────────────────────────────────────────────────
+// Serves images, audio, and documents stored in the vega_agent_files bucket.
+app.get("/files/:path{.+$}", async (c) => {
+  const path = c.req.param("path");
+  if (!c.env.FILES_BUCKET) {
+    return c.json({ error: "FILES_BUCKET not bound" }, 500);
+  }
+
+  const object = await c.env.FILES_BUCKET.get(path);
+  if (!object) {
+    return c.json({ error: "File not found" }, 404);
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+
+  // Ensure we have a content-type, fallback to octet-stream
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/octet-stream");
+  }
+
+  return new Response(object.body, { headers });
+});
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 // Primary conversational endpoint. Always streams via SSE (x-stream: true is default).
 // Tool events are emitted in real-time as the agent executes tools.
