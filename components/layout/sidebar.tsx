@@ -8,7 +8,6 @@ import {
   BotIcon,
   ChevronLeftIcon,
   HistoryIcon,
-  MenuIcon,
   MessageSquareIcon,
   RocketIcon,
   SettingsIcon,
@@ -19,6 +18,7 @@ import {
 import { NavItem } from "./nav-item";
 import { cn } from "@/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
+import { useSidebar } from "./sidebar-context";
 
 interface ChatSession {
   id: string;
@@ -30,7 +30,7 @@ interface ChatSession {
 }
 
 export function Sidebar() {
-  const [isOpen, setIsOpen] = useState(false);
+  const { isOpen, setIsOpen } = useSidebar();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [recentChats, setRecentChats] = useState<ChatSession[]>([]);
   const [mounted, setMounted] = useState(false);
@@ -64,19 +64,6 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile toggle */}
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="fixed top-4 left-4 z-50 lg:hidden p-2 rounded-md border border-[#1e1e22] bg-[#0a0a0b]/80 backdrop-blur hover:bg-[#1e1e22] shadow-lg transition-colors"
-        aria-label="Toggle sidebar"
-      >
-        {isOpen ? (
-          <XIcon className="size-5 text-[#e8e8ea]" />
-        ) : (
-          <MenuIcon className="size-5 text-[#e8e8ea]" />
-        )}
-      </button>
-
       {/* Backdrop for mobile */}
       <AnimatePresence>
         {isOpen && (
@@ -115,18 +102,28 @@ export function Sidebar() {
               <BotIcon className="size-3.5 text-[#0a0a0b]" />
             </div>
           )}
-          <button
-            onClick={handleCollapse}
-            className="hidden lg:flex p-1 rounded-md hover:bg-[#1e1e22] transition-colors"
-            aria-label="Toggle sidebar collapse"
-          >
-            <ChevronLeftIcon
-              className={cn(
-                "size-4 text-[#6b6b7a] transition-transform",
-                isCollapsed && "rotate-180"
-              )}
-            />
-          </button>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsOpen(false)}
+              className="lg:hidden p-1 rounded-md hover:bg-[#1e1e22] transition-colors"
+              aria-label="Close sidebar"
+            >
+              <XIcon className="size-4 text-[#6b6b7a]" />
+            </button>
+            <button
+              onClick={handleCollapse}
+              className="hidden lg:flex p-1 rounded-md hover:bg-[#1e1e22] transition-colors"
+              aria-label="Toggle sidebar collapse"
+            >
+              <ChevronLeftIcon
+                className={cn(
+                  "size-4 text-[#6b6b7a] transition-transform",
+                  isCollapsed && "rotate-180"
+                )}
+              />
+            </button>
+          </div>
         </div>
 
         {/* Navigation */}
@@ -218,4 +215,5 @@ export function Sidebar() {
     </>
   );
 }
+
 
