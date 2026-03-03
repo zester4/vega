@@ -1,7 +1,7 @@
 /**
  * src/db/queries.ts — D1 query helpers. All SQL lives here; callers pass D1Database.
  */
-import { TELEGRAM_CONFIGS_TABLE, SQL_CREATE_TELEGRAM_CONFIGS } from "./schema";
+import { TELEGRAM_CONFIGS_TABLE } from "./schema";
 
 export type TelegramConfigRow = {
   user_id: string;
@@ -16,7 +16,14 @@ export type TelegramConfigRow = {
 
 /** Ensure telegram_configs table and index exist. */
 export async function ensureTelegramConfigsTable(db: D1Database): Promise<void> {
-  await db.exec(SQL_CREATE_TELEGRAM_CONFIGS);
+  // Use prepare().run() instead of exec() — exec() is unreliable in Wrangler local D1
+  // for multi-line DDL statements. prepare().run() works in both local and remote.
+  await db.prepare(
+    `CREATE TABLE IF NOT EXISTS ${TELEGRAM_CONFIGS_TABLE} (user_id TEXT NOT NULL PRIMARY KEY, token TEXT NOT NULL, secret TEXT NOT NULL UNIQUE, bot_id INTEGER NOT NULL, username TEXT NOT NULL, first_name TEXT NOT NULL, webhook_url TEXT NOT NULL, connected_at TEXT NOT NULL)`
+  ).run();
+  await db.prepare(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_configs_secret ON ${TELEGRAM_CONFIGS_TABLE}(secret)`
+  ).run();
 }
 
 /** Get a single row by secret. */
