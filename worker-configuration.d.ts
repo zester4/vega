@@ -20,7 +20,7 @@ interface Env {
   WORKER_URL: string;             // Deployed Worker URL (for webhooks/workflows)
   BRIDGE_URL: string;             // Next.js Bridge URL (local or Vercel)
   UPSTASH_WORKFLOW_URL: string;   // Required by Upstash Workflow (must match WORKER_URL)
-  TELEGRAM_BOT_TOKEN?: string;    // Optional fallback token
+  TELEGRAM_BOT_TOKEN?: string;    // Legacy global bot token (unused in per-user D1 setup)
 
   // ── AI & Search ───────────────────────────────────────────────────────────
   GEMINI_API_KEY: string;  // Google Gemini API key

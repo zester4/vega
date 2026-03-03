@@ -1042,15 +1042,8 @@ export async function setupTelegramBot(
         return config;
     }
 
-    // Fallback: Redis (legacy / no auth)
-    const { getRedis } = await import("./memory");
-    const redis = getRedis(env);
-    console.log(`[Telegram Setup] Saving configuration for @${config.username} to Redis...`);
-    await redis.set("tg:config", JSON.stringify(config));
-    await redis.set("tg:enabled", "1");
-    const verify = await redis.get("tg:config");
-    if (verify) console.log("[Telegram Setup] Verification successful: config exists in Redis.");
-    else console.error("[Telegram Setup] ERROR: Config was NOT saved to Redis!");
+    // Multi-tenant mode requires a userId + D1 binding.
+    console.warn("[Telegram Setup] Missing userId or D1 binding. Per-user setup is required; no config was persisted.");
     return config;
 }
 
@@ -1075,102 +1068,18 @@ export async function disconnectTelegramBot(env: Env, userId?: string): Promise<
         return;
     }
 
-    const { getRedis } = await import("./memory");
-    const redis = getRedis(env);
-    const raw = await redis.get("tg:config") as string | null;
-    if (raw) {
-        try {
-            const config: TelegramBotConfig = JSON.parse(raw);
-            const bot = new TelegramBot(config.token);
-            await bot.deleteWebhook().catch((err) => {
-                console.error("[Telegram Disconnect] Failed to delete webhook from Telegram:", err);
-            });
-        } catch (err) {
-            console.error("[Telegram Disconnect] Failed to parse config from Redis:", err);
-        }
-    }
-    await redis.del("tg:config");
-    await redis.del("tg:enabled");
-    console.log("[Telegram Disconnect] Config cleared from Redis.");
+    // Legacy global config via Redis has been removed; nothing to do here.
+    console.warn("[Telegram Disconnect] Called without userId/DB. No action taken in multi-tenant mode.");
 }
 
 /**
- * Load the current bot config from Redis or environment fallback.
- * Returns null if no bot is connected.
+ * Legacy helper for a single global bot config.
+ * In the new multi-tenant design we no longer load Telegram tokens
+ * from Redis or TELEGRAM_BOT_TOKEN — all configs live in D1 per user.
+ * This now always returns null but is kept for backwards compatibility.
  */
-export async function getTelegramConfig(env: Env): Promise<TelegramBotConfig | null> {
-    const { getRedis } = await import("./memory");
-    const redis = getRedis(env);
-
-    // 1. Try Redis first (dynamic config)
-    const raw = await redis.get("tg:config") as string | null;
-    if (raw) {
-        try {
-            const config = JSON.parse(raw) as TelegramBotConfig;
-            console.log(`[Telegram Config] Found config in Redis for @${config.username}`);
-            return config;
-        } catch {
-            // Ignore parse error and fallback
-        }
-    }
-
-    // 2. Try Environment Variable Fallback
-    if (env.TELEGRAM_BOT_TOKEN) {
-        console.log("[Telegram Config] Redis config missing, trying environment variable...");
-        const token = env.TELEGRAM_BOT_TOKEN;
-        const secret = await getTelegramSecret(token);
-        const bot = new TelegramBot(token);
-
-        // Fallback webhook URL: use UPSTASH_WORKFLOW_URL (public worker URL)
-        // Using indexed access to avoid TS errors if WORKER_URL is not in Env type
-        const rawUrl = env.UPSTASH_WORKFLOW_URL || (env as any).WORKER_URL || "";
-        const publicUrl = rawUrl.trim();
-        const webhookUrl = publicUrl ? `${publicUrl.replace(/\/$/, "")}/telegram/webhook` : "";
-
-        try {
-            // Validate the token and get bot info
-            const me = await bot.getMe();
-            const config: TelegramBotConfig = {
-                token,
-                botId: me.id,
-                username: me.username || "bot",
-                firstName: me.first_name,
-                webhookUrl,
-                secret,
-                connectedAt: new Date().toISOString(),
-            };
-
-            // CRITICAL: register the webhook with Telegram so it knows where to POST updates.
-            // Without this call, Telegram has no idea where to send messages.
-            if (webhookUrl) {
-                try {
-                    await bot.setWebhook(webhookUrl, secret);
-                    console.log(`[Telegram Config] Webhook auto-registered at: ${webhookUrl}`);
-                } catch (whErr) {
-                    console.error("[Telegram Config] Failed to auto-register webhook:", whErr);
-                }
-
-                // Save config to Redis so the next request doesn't have to re-register
-                try {
-                    await redis.set("tg:config", JSON.stringify(config));
-                    await redis.set("tg:enabled", "1");
-                    console.log(`[Telegram Config] Config saved to Redis for @${config.username}`);
-                } catch (redisErr) {
-                    console.error("[Telegram Config] Failed to persist config to Redis:", redisErr);
-                }
-            } else {
-                console.warn("[Telegram Config] No public URL configured — webhook NOT registered. Set UPSTASH_WORKFLOW_URL to your ngrok/public URL.");
-            }
-
-            console.log(`[Telegram Config] Fallback env config ready for @${config.username}. Webhook: ${config.webhookUrl}`);
-            return config;
-        } catch (err) {
-            console.error("[Telegram Config] Fallback token is invalid or API error:", err);
-            return null;
-        }
-    }
-
-    console.warn("[Telegram Config] No bot configuration found in Redis or Environment.");
+export async function getTelegramConfig(_env: Env): Promise<TelegramBotConfig | null> {
+    console.warn("[Telegram Config] Legacy global config is disabled. Use per-user D1 configs instead.");
     return null;
 }
 

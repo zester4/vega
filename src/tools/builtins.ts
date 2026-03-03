@@ -2003,8 +2003,8 @@ async function execHumanApprovalGate(args: ToolArgs, env: Env): Promise<Record<s
   await redis.lpush("agent:approvals", JSON.stringify(record));
   await redis.ltrim("agent:approvals", 0, 99);
 
-  // Optional: notify via Telegram if configured
-  if ((channel === "telegram" || channel === "all") && env.TELEGRAM_BOT_TOKEN) {
+  // Optional: notify via Telegram (disabled unless a global bot is explicitly wired up)
+  if (channel === "telegram" || channel === "all") {
     try {
       const { getTelegramConfig, TelegramBot } = await import("../telegram");
       const config = await getTelegramConfig(env);
