@@ -97,7 +97,7 @@ TELEGRAM_INTERNAL_SECRET=<shared-secret-with-worker>
 
 **Vercel**: Set the same vars in the project (Environment Variables). You need at least: `NEON_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_API_KEY`, `WORKER_URL`, `TELEGRAM_INTERNAL_SECRET`. Optional: `BETTER_AUTH_URL` (your deployed app URL, e.g. `https://vega-ebon.vercel.app`) to fix redirect/callback URLs.
 
-- **Better Auth dashboard**: Install `@better-auth/infra`, add the `dash()` plugin in `lib/auth.ts`, then create a project at [dash.better-auth.com](https://dash.better-auth.com). Set `BETTER_AUTH_API_KEY` to the key shown there. In “Connect Your App” use your deployed URL (e.g. `https://vega-ebon.vercel.app`) and path `/api/auth`.
+- **Better Auth dashboard**: Install `@better-auth/infra`, add the `dash()` plugin in `lib/auth.ts`, then create a project at [dash.better-auth.com](https://dash.better-auth.com). Set `BETTER_AUTH_API_KEY` to the key shown there (required on Vercel for “Connect Your App”). In “Connect Your App” use your deployed URL (e.g. `https://vega-ebon.vercel.app`) and path `/api/auth`. If you get “Connection Failed” or `GET /api/auth/dash/config 401`: (1) Add `BETTER_AUTH_API_KEY` in Vercel Environment Variables with the exact key from the dashboard, (2) Redeploy so the new env is applied.
 
 - Run migrations once (or let `npm run build` do it):
 

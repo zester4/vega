@@ -32,9 +32,16 @@ export const auth = betterAuth({
   baseURL:
     process.env.BETTER_AUTH_URL ??
     (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined),
-  trustedOrigins: process.env.BETTER_AUTH_URL
-    ? [process.env.BETTER_AUTH_URL]
-    : undefined,
+  // Fix "Invalid origin": allow localhost, your app URL, Vercel previews, and dash.better-auth.com (for dash plugin)
+  trustedOrigins: [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://vega-ebon.vercel.app",
+    "https://*.vercel.app",
+    "https://dash.better-auth.com",
+    ...(process.env.BETTER_AUTH_URL ? [process.env.BETTER_AUTH_URL] : []),
+    ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
+  ].filter((o, i, arr) => arr.indexOf(o) === i),
   plugins: [
     dash({ apiKey: process.env.BETTER_AUTH_API_KEY }),
     nextCookies(), // keep last for server-action cookies
