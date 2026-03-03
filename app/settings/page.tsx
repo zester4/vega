@@ -5,17 +5,17 @@
  * app/settings/page.tsx — VEGA Settings
  *
  * Sections:
- *   1. Telegram Integration — paste bot token → connect → live status + activity feed
+ *   1. Telegram Integration — connect your own bot (per user) with live status + activity feed
  *   2. Agent Configuration  — system prompt, model settings (future)
  *   3. Danger Zone          — reset all memory, clear history
  *
- * Telegram Connect Flow:
- *   1. User creates a bot via @BotFather, copies the token
- *   2. Pastes token here → clicks Connect
+ * Telegram Connect Flow (per user, multi-tenant):
+ *   1. You create a bot via @BotFather and copy the token
+ *   2. Paste the token here → click Connect
  *   3. Frontend POSTs to /api/telegram/setup (Next.js proxy → Worker)
- *   4. Worker validates token, calls setWebhook, stores config in Redis
- *   5. Status card shows bot username, webhook URL, message count
- *   6. Activity feed polls /api/telegram/activity every 10s
+ *   4. Worker validates the token, calls setWebhook, and stores your config in D1 keyed by your user id
+ *   5. Status card shows your bot username, webhook URL, and message stats
+ *   6. Activity feed polls /api/telegram/activity every 10s (scoped to your account)
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -154,17 +154,17 @@ export default function SettingsPage() {
         {/* ── Danger Zone ──────────────────────────────────────────────────────── */}
         <DangerZone />
 
-        {/* ── Debug: Force Disconnect ──────────────────────────────────────────── */}
+        {/* ── Debug: Force Disconnect (current user only) ─────────────────────── */}
         <motion.section
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
           className="space-y-3 mt-8 pt-8 border-t border-[#1e1e22]"
         >
-          <p className="text-xs text-[#4a4a58]">Debug: Force clear Telegram config</p>
+          <p className="text-xs text-[#4a4a58]">Debug: Force clear your Telegram config</p>
           <button
             onClick={async () => {
-              if (!confirm("Force clear ALL Telegram configuration from Redis? This will disconnect any active bot.")) return;
+              if (!confirm("Force clear your Telegram configuration from the backend? This will disconnect your current bot.")) return;
               try {
                 await api("DELETE", "/telegram/disconnect");
                 alert("✓ Configuration cleared. The bot should now be disconnected.");
@@ -381,7 +381,7 @@ function TelegramSection({
 
         ) : (
           /* ── Disconnected state ─────────────────────────────────────────── */
-          <div className="p-6 space-y-6">
+            <div className="p-6 space-y-6">
 
             {/* Step-by-step guide */}
             <div className="space-y-4">
@@ -409,7 +409,7 @@ function TelegramSection({
               </SetupStep>
 
               <SetupStep n={3} title="Paste it here and connect">
-                That's it — VEGA registers the webhook automatically.
+                That's it — VEGA registers the webhook automatically and links this bot to your account only.
               </SetupStep>
             </div>
 
@@ -468,8 +468,8 @@ function TelegramSection({
 
             {/* Privacy note */}
             <p className="text-xs text-[#4a4a58]">
-              🔒 Your token is stored encrypted in Redis and never exposed in the frontend.
-              Webhook requests are verified with a SHA-256 secret.
+              🔒 Your bot token is stored server-side (in the Worker + D1 layer) scoped to your user account and never exposed in the frontend.
+              Webhook requests are verified with a secret so only your configured bot can talk to VEGA.
             </p>
           </div>
         )}
