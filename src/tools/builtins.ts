@@ -87,13 +87,25 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "web_search",
     description:
-      "Search the web using Google (via Serper.dev) or DuckDuckGo fallback. Returns rich results including snippets, direct answers, Knowledge Graph, People Also Ask, related searches, and (optionally) full page content. Use type='news' for recent events. Set depth='deep' to also fetch full content of the top 2 results for comprehensive research.",
+      "Search the web using Google (via Serper.dev) with rich SERP data, or DuckDuckGo as fallback. Supports 9 search types: 'search' (default), 'news', 'images', 'videos', 'shopping', 'scholar' (academic papers with citation counts), 'places' (local businesses/maps), 'patents', 'autocomplete'. Returns organic results, direct answer box, Knowledge Graph, People Also Ask, related searches, top stories, and type-specific data (prices for shopping, duration for videos, citations for scholar, etc.). Use type='news' for breaking news. Set depth='deep' to also fetch full content of top 3 pages. Use timeRange to filter by recency. Use country/language for localized results.",
     parameters: {
       properties: {
         query: { type: "string", description: "The search query" },
-        type: { type: "string", enum: ["search", "news", "images"], description: "Type of search (default: search)" },
-        maxResults: { type: "number", description: "Max results to return (1-10, default: 8)" },
-        depth: { type: "string", enum: ["quick", "deep"], description: "'quick' returns snippets only (fast). 'deep' also fetches full content of top 2 pages (slower, more thorough)." },
+        type: {
+          type: "string",
+          enum: ["search", "news", "images", "videos", "shopping", "scholar", "places", "patents", "autocomplete"],
+          description: "Search type. Default: 'search'. Use 'scholar' for academic papers, 'shopping' for product prices, 'places' for local businesses, 'videos' for YouTube/video results, 'patents' for patent search."
+        },
+        maxResults: { type: "number", description: "Max results to return (1-100, default: 8)" },
+        depth: { type: "string", enum: ["quick", "deep"], description: "'quick' returns snippets only (fast, default). 'deep' also fetches full text of top 3 pages (slower, more thorough — use for research)." },
+        timeRange: {
+          type: "string",
+          enum: ["hour", "day", "week", "month", "year"],
+          description: "Filter results by recency. 'hour'=past hour, 'day'=past 24h, 'week'=past 7 days, 'month'=past month, 'year'=past year. Leave blank for all time."
+        },
+        country: { type: "string", description: "Country code for localized results (ISO 3166-1 alpha-2). Examples: 'us', 'gb', 'de', 'fr', 'gh', 'ng', 'jp'. Leave blank for global." },
+        language: { type: "string", description: "Language code for results. Examples: 'en', 'fr', 'de', 'es', 'ar', 'zh-cn', 'ja'. Leave blank for English." },
+        location: { type: "string", description: "Geographic location string for hyper-local results. Example: 'New York, NY, United States', 'London, England'." },
       },
       required: ["query"],
     },
@@ -985,31 +997,80 @@ Return ONLY valid JSON, no other text.`,
 // SEARCH & FETCH IMPLEMENTATIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Serper endpoint map ───────────────────────────────────────────────────────
+const SERPER_ENDPOINTS: Record<string, string> = {
+  search:       "https://google.serper.dev/search",
+  news:         "https://google.serper.dev/news",
+  images:       "https://google.serper.dev/images",
+  videos:       "https://google.serper.dev/videos",
+  shopping:     "https://google.serper.dev/shopping",
+  scholar:      "https://google.serper.dev/scholar",
+  places:       "https://google.serper.dev/places",
+  patents:      "https://google.serper.dev/patents",
+  autocomplete: "https://google.serper.dev/autocomplete",
+};
+
+// ── Time range → Serper tbs param ─────────────────────────────────────────────
+const TIME_RANGE_MAP: Record<string, string> = {
+  hour:  "qdr:h",
+  day:   "qdr:d",
+  week:  "qdr:w",
+  month: "qdr:m",
+  year:  "qdr:y",
+};
+
 async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { query, type = "search", maxResults = 8, depth = "quick" } = args as {
-    query: string; type?: string; maxResults?: number; depth?: string;
+  const {
+    query,
+    type = "search",
+    maxResults = 8,
+    depth = "quick",
+    timeRange,
+    country,
+    language,
+    location,
+  } = args as {
+    query: string;
+    type?: string;
+    maxResults?: number;
+    depth?: string;
+    timeRange?: string;
+    country?: string;
+    language?: string;
+    location?: string;
   };
 
+  const numResults = Math.min(Math.max(Number(maxResults) || 8, 1), 100);
   let serperData: Record<string, unknown> | null = null;
 
   if (env.SERPER_API_KEY) {
-    const endpoint = type === "news"
-      ? "https://google.serper.dev/news"
-      : type === "images"
-        ? "https://google.serper.dev/images"
-        : "https://google.serper.dev/search";
+    const endpoint = SERPER_ENDPOINTS[type] ?? SERPER_ENDPOINTS.search;
+
+    // Build request body — only include optional params when provided
+    const body: Record<string, unknown> = {
+      q: query,
+      num: numResults,
+    };
+    if (timeRange && TIME_RANGE_MAP[timeRange]) body.tbs = TIME_RANGE_MAP[timeRange];
+    if (country)  body.gl = country.toLowerCase();
+    if (language) body.hl = language.toLowerCase();
+    if (location) body.location = location;
 
     try {
       const res = await fetch(endpoint, {
         method: "POST",
-        headers: { "X-API-KEY": env.SERPER_API_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({ q: query, num: Math.min(Number(maxResults), 10) }),
+        headers: {
+          "X-API-KEY": env.SERPER_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
       });
 
       if (res.ok) {
         serperData = await res.json() as Record<string, unknown>;
       } else {
-        console.warn(`[web_search] Serper returned ${res.status}, falling back`);
+        const errText = await res.text().catch(() => "");
+        console.warn(`[web_search] Serper ${res.status}: ${errText.slice(0, 200)}`);
       }
     } catch (e) {
       console.warn(`[web_search] Serper fetch failed: ${String(e)}`);
@@ -1017,83 +1078,222 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
   }
 
   if (!serperData) {
-    return await duckDuckGoFallback(query, Number(maxResults));
+    return await duckDuckGoFallback(query, numResults);
   }
 
-  // ── Parse organic results
-  const organic = (serperData.organic as unknown[] ?? []).slice(0, Number(maxResults));
-  const results = organic.map((r) => {
+  // ── Base output skeleton
+  const output: Record<string, unknown> = { query, type, filters: { timeRange, country, language, location } };
+
+  // ── Answer box (direct answer) ─────────────────────────────────────────────
+  const answerBox = serperData.answerBox as Record<string, unknown> | undefined;
+  if (answerBox) {
+    output.directAnswer = {
+      title: String(answerBox.title ?? ""),
+      answer: String(answerBox.answer ?? answerBox.snippet ?? ""),
+      source: answerBox.link ?? null,
+    };
+  }
+
+  // ── Knowledge Graph ────────────────────────────────────────────────────────
+  const kg = serperData.knowledgeGraph as Record<string, unknown> | undefined;
+  if (kg) {
+    output.knowledgeGraph = {
+      title: String(kg.title ?? ""),
+      type: kg.type ?? null,
+      description: String(kg.description ?? ""),
+      website: kg.website ?? null,
+      imageUrl: kg.imageUrl ?? null,
+      attributes: kg.attributes ?? null,
+    };
+  }
+
+  // ── Type-specific result parsing ───────────────────────────────────────────
+  if (type === "autocomplete") {
+    // Autocomplete returns a flat array of suggestion strings
+    const suggestions = (serperData.suggestions as unknown[] ?? []).map((s) => {
+      const item = s as Record<string, unknown>;
+      return item.value ?? String(s);
+    });
+    return { ...output, suggestions, count: suggestions.length };
+  }
+
+  if (type === "images") {
+    const images = (serperData.images as unknown[] ?? []).slice(0, numResults).map((img) => {
+      const i = img as Record<string, unknown>;
+      return {
+        title:        String(i.title ?? ""),
+        imageUrl:     i.imageUrl,
+        thumbnailUrl: i.thumbnailUrl,
+        source:       i.source ?? null,
+        domain:       i.domain ?? null,
+        link:         i.link,
+        width:        i.imageWidth ?? null,
+        height:       i.imageHeight ?? null,
+        position:     i.position,
+      };
+    });
+    return { ...output, images, count: images.length };
+  }
+
+  if (type === "videos") {
+    const videos = (serperData.videos as unknown[] ?? []).slice(0, numResults).map((v) => {
+      const item = v as Record<string, unknown>;
+      return {
+        title:    String(item.title ?? ""),
+        url:      item.link,
+        snippet:  item.snippet ?? null,
+        duration: item.duration ?? null,
+        source:   item.source ?? null,
+        channel:  item.channel ?? null,
+        date:     item.date ?? null,
+        imageUrl: item.imageUrl ?? null,
+        position: item.position,
+      };
+    });
+    return { ...output, videos, count: videos.length };
+  }
+
+  if (type === "shopping") {
+    const shopping = (serperData.shopping as unknown[] ?? []).slice(0, numResults).map((p) => {
+      const item = p as Record<string, unknown>;
+      return {
+        title:       String(item.title ?? ""),
+        url:         item.link,
+        source:      item.source ?? null,
+        price:       item.price ?? null,
+        delivery:    item.delivery ?? null,
+        rating:      item.rating ?? null,
+        ratingCount: item.ratingCount ?? null,
+        offers:      item.offers ?? null,
+        imageUrl:    item.imageUrl ?? null,
+        position:    item.position,
+      };
+    });
+    return { ...output, shopping, count: shopping.length };
+  }
+
+  if (type === "places") {
+    const places = (serperData.places as unknown[] ?? []).slice(0, numResults).map((p) => {
+      const item = p as Record<string, unknown>;
+      return {
+        title:       String(item.title ?? ""),
+        address:     item.address ?? null,
+        phone:       item.phoneNumber ?? null,
+        website:     item.website ?? null,
+        rating:      item.rating ?? null,
+        ratingCount: item.ratingCount ?? null,
+        type:        item.type ?? null,
+        description: item.description ?? null,
+        latitude:    item.latitude ?? null,
+        longitude:   item.longitude ?? null,
+        cid:         item.cid ?? null,
+        position:    item.position,
+      };
+    });
+    return { ...output, places, count: places.length };
+  }
+
+  if (type === "scholar") {
+    const papers = (serperData.organic as unknown[] ?? []).slice(0, numResults).map((p) => {
+      const item = p as Record<string, unknown>;
+      return {
+        title:           String(item.title ?? ""),
+        url:             item.link,
+        snippet:         item.snippet ?? null,
+        publicationInfo: item.publicationInfo ?? null,
+        year:            item.year ?? null,
+        citedBy:         item.citedBy ?? null,
+        position:        item.position,
+      };
+    });
+    return { ...output, papers, count: papers.length };
+  }
+
+  if (type === "patents") {
+    const patents = (serperData.organic as unknown[] ?? []).slice(0, numResults).map((p) => {
+      const item = p as Record<string, unknown>;
+      return {
+        title:             String(item.title ?? ""),
+        url:               item.link,
+        snippet:           item.snippet ?? null,
+        inventor:          item.inventor ?? null,
+        assignee:          item.assignee ?? null,
+        publicationNumber: item.publicationNumber ?? null,
+        filingDate:        item.filingDate ?? null,
+        grantDate:         item.grantDate ?? null,
+        thumbnailUrl:      item.thumbnailUrl ?? null,
+        position:          item.position,
+      };
+    });
+    return { ...output, patents, count: patents.length };
+  }
+
+  // ── Default: organic web/news results ─────────────────────────────────────
+  const organicRaw = (serperData.organic as unknown[] ?? []).slice(0, numResults);
+  const results = organicRaw.map((r) => {
     const item = r as Record<string, unknown>;
     return {
-      title: String(item.title ?? ""),
-      snippet: String(item.snippet ?? ""),
-      url: String(item.link ?? ""),
-      date: item.date ? String(item.date) : undefined,
-      position: item.position,
-      sitelinks: item.sitelinks,
+      title:     String(item.title ?? ""),
+      snippet:   String(item.snippet ?? ""),
+      url:       String(item.link ?? ""),
+      date:      item.date ? String(item.date) : undefined,
+      source:    item.source ?? undefined,         // for news results
+      imageUrl:  item.imageUrl ?? undefined,       // for news results
+      sitelinks: item.sitelinks ?? undefined,
+      attributes: item.attributes ?? undefined,
+      position:  item.position,
     };
   });
 
-  // ── Rich extras
-  const kg = serperData.knowledgeGraph as Record<string, unknown> | undefined;
-  const answerBox = serperData.answerBox as Record<string, unknown> | undefined;
-  const paa = (serperData.peopleAlsoAsk as unknown[] ?? []).slice(0, 4);
-  const related = (serperData.relatedSearches as unknown[] ?? []).slice(0, 5).map(
-    (r) => typeof r === "object" ? (r as Record<string, unknown>).query : r
+  // ── Top stories (news snippets surfaced in web search)
+  const topStories = (serperData.topStories as unknown[] ?? []).slice(0, 5).map((s) => {
+    const item = s as Record<string, unknown>;
+    return { title: String(item.title ?? ""), url: item.link, source: item.source, date: item.date, imageUrl: item.imageUrl ?? null };
+  });
+
+  // ── People Also Ask
+  const paa = (serperData.peopleAlsoAsk as unknown[] ?? []).slice(0, 5).map((q) => {
+    const item = q as Record<string, unknown>;
+    return { question: item.question, snippet: item.snippet, url: item.link };
+  });
+
+  // ── Related searches
+  const related = (serperData.relatedSearches as unknown[] ?? []).slice(0, 6).map(
+    (r) => (typeof r === "object" ? (r as Record<string, unknown>).query : r)
   );
-  const images = type === "images"
-    ? (serperData.images as unknown[] ?? []).slice(0, 5).map((img) => {
-      const i = img as Record<string, unknown>;
-      return { title: i.title, imageUrl: i.imageUrl, link: i.link };
-    })
-    : undefined;
 
-  const output: Record<string, unknown> = {
-    query,
-    type,
-    results,
-    count: results.length,
-    ...(answerBox && {
-      directAnswer: {
-        title: String(answerBox.title ?? ""),
-        answer: String(answerBox.answer ?? answerBox.snippet ?? ""),
-        source: answerBox.link,
-      },
-    }),
-    ...(kg && {
-      knowledgeGraph: {
-        title: String(kg.title ?? ""),
-        type: kg.type,
-        description: String(kg.description ?? ""),
-        imageUrl: kg.imageUrl,
-        attributes: kg.attributes,
-      },
-    }),
-    ...(paa.length > 0 && { peopleAlsoAsk: paa }),
-    ...(related.length > 0 && { relatedSearches: related }),
-    ...(images && { images }),
-  };
+  output.results      = results;
+  output.count        = results.length;
+  if (topStories.length > 0) output.topStories      = topStories;
+  if (paa.length > 0)        output.peopleAlsoAsk   = paa;
+  if (related.length > 0)    output.relatedSearches = related;
 
-  // ── Deep mode: fetch full content of top 2 pages
+  // ── Deep mode: fetch full text of top 3 organic results ───────────────────
   if (depth === "deep" && results.length > 0) {
-    const topUrls = results.slice(0, 2).map((r) => r.url).filter(Boolean);
-    const pageContents: { url: string; content: string }[] = [];
+    const topUrls = results.slice(0, 3).map((r) => r.url).filter(Boolean);
+    const pageContents: { url: string; content: string; length: number }[] = [];
 
-    for (const url of topUrls) {
-      try {
-        const res = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; VEGA-Agent/2.0)" },
-          signal: AbortSignal.timeout(5000),
-        });
-        const raw = await res.text();
-        pageContents.push({ url, content: stripHtml(raw).slice(0, 4000) });
-      } catch (e) {
-        pageContents.push({ url, content: `[Failed to fetch: ${String(e)}]` });
-      }
-    }
+    await Promise.all(
+      topUrls.map(async (url) => {
+        try {
+          const res = await fetch(url as string, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            signal: AbortSignal.timeout(6000),
+          });
+          const raw = await res.text();
+          const text = stripHtml(raw);
+          pageContents.push({ url: url as string, content: text.slice(0, 5000), length: text.length });
+        } catch (e) {
+          pageContents.push({ url: url as string, content: `[Failed to fetch: ${String(e)}]`, length: 0 });
+        }
+      })
+    );
 
     output.pageContents = pageContents;
-    output.note = "Deep mode: full content fetched from top 2 results.";
+    output.deepMode = `Full content fetched from ${pageContents.length} pages.`;
   }
 
   return output;
@@ -1651,7 +1851,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
     agentId,
     agentName,
     spawnedAt: new Date().toISOString(),
-    status: "initializing",
+    status: "running",
     scheduledFor: scheduledFor ?? null,
     agentConfig,
   };
@@ -1661,37 +1861,56 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
   // Fast O(1) lookup key for invoke_agent
   await redis.set(`agent:config:${agentId}`, JSON.stringify(agentRecord), { ex: 60 * 60 * 24 * 30 });
 
-  // ── Scheduled future spawn: use QStash notBefore ──────────────────────────
+  // FIX: Eagerly create the task record BEFORE dispatching so get_agent_result
+  // never returns "initializing" — it can always see the task in Redis.
+  const { createTask } = await import("../memory");
+  await createTask(redis, {
+    id: agentId,
+    type: "sub_agent",
+    payload: { instructions, agentConfig },
+    status: "running",
+  }).catch((e) => console.warn("[execSpawnAgent] pre-createTask failed:", String(e)));
+
+  const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+
+  if (!workerBase) {
+    console.warn(`[execSpawnAgent] UPSTASH_WORKFLOW_URL not set — cannot dispatch sub-agent ${agentId}`);
+    const { updateTask } = await import("../memory");
+    await updateTask(redis, agentId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => {});
+    return { success: false, error: "UPSTASH_WORKFLOW_URL is not configured — cannot dispatch sub-agent." };
+  }
+
+  // ── Scheduled future spawn: use Workflow Client delay ─────────────────────
+  // Both scheduled and immediate use the same /workflow endpoint so QStash
+  // owns durability, retries, and per-step timeout management.
   if (scheduledFor && scheduledFor !== "now" && scheduledFor.toLowerCase() !== "immediately") {
     const delaySeconds = parseScheduledFor(scheduledFor);
     if (delaySeconds > 0) {
       try {
-        const qstash = new QStashClient({ token: env.QSTASH_TOKEN, baseUrl: env.QSTASH_URL });
-        const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-        const notBefore = Math.floor(Date.now() / 1000) + delaySeconds;
+        const { Client: WorkflowClient } = await import("@upstash/workflow");
+        const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
 
-        // Update agent record as scheduled
-        const scheduledRecord = { ...agentRecord, status: "scheduled", scheduledAt: new Date(notBefore * 1000).toISOString() };
+        const notBeforeTs = Math.floor(Date.now() / 1000) + delaySeconds;
+        const scheduledRecord = {
+          ...agentRecord,
+          status: "scheduled",
+          scheduledAt: new Date(notBeforeTs * 1000).toISOString(),
+        };
         await redis.set(`agent:config:${agentId}`, JSON.stringify(scheduledRecord), { ex: 60 * 60 * 24 * 30 });
-        // Update the list too
         try {
           const raw = await redis.lrange("agent:spawned", 0, 0) as string[];
-          if (raw[0]) {
-            const latest = JSON.parse(raw[0]);
-            if (latest.agentId === agentId) {
-              await redis.lset("agent:spawned", 0, JSON.stringify(scheduledRecord));
-            }
+          if (raw[0] && JSON.parse(raw[0]).agentId === agentId) {
+            await redis.lset("agent:spawned", 0, JSON.stringify(scheduledRecord));
           }
         } catch { /* ignore */ }
 
-        await qstash.publishJSON({
-          url: `${workerBase}/run-subagent`,
-          notBefore,
+        await wfClient.trigger({
+          url: `${workerBase}/workflow`,
           body: payload,
-          headers: { "X-Internal-Secret": env.TELEGRAM_INTERNAL_SECRET ?? "" },
-        } as Parameters<typeof qstash.publishJSON>[0]);
+          delay: delaySeconds,   // QStash holds the message until notBefore
+        });
 
-        const humanTime = new Date(notBefore * 1000).toLocaleString();
+        const humanTime = new Date(notBeforeTs * 1000).toLocaleString();
         return {
           success: true,
           agentId,
@@ -1699,44 +1918,35 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
           status: "scheduled",
           scheduledFor: humanTime,
           delaySeconds,
-          message: `Agent '${agentName}' scheduled to run at ${humanTime}. ID: ${agentId}`,
+          message: `Agent '${agentName}' scheduled via QStash Workflow — runs at ${humanTime}. ID: ${agentId}`,
           instructions: `Check status: get_agent_result('${agentId}')`,
         };
       } catch (e) {
-        console.warn(`[execSpawnAgent] Scheduled spawn failed, falling through to immediate: ${String(e)}`);
+        console.warn(`[execSpawnAgent] Scheduled workflow trigger failed, falling through to immediate: ${String(e)}`);
       }
     }
   }
 
-  // ── Immediate spawn: call our own /run-subagent endpoint directly ───────────
-  // This bypasses QStash/Upstash Workflow and uses Cloudflare waitUntil instead.
-  // Much more reliable — no callback URL issues in local dev or production.
+  // ── Immediate spawn: trigger Upstash Workflow via QStash ──────────────────
+  // Each agentic iteration runs as its own context.run() step — a separate
+  // Worker invocation — so there is NO cumulative timeout regardless of how
+  // long the agent takes. QStash handles retries on failure automatically.
   try {
-    const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-    if (workerBase) {
-      const spawnRes = await fetch(`${workerBase}/run-subagent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Internal-Secret": env.TELEGRAM_INTERNAL_SECRET ?? "",
-        },
-        body: JSON.stringify(payload),
-      });
+    const { Client: WorkflowClient } = await import("@upstash/workflow");
+    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
 
-      if (spawnRes.ok || spawnRes.status === 202) {
-        console.log(`[execSpawnAgent] ${agentId} dispatched to /run-subagent (${spawnRes.status})`);
-      } else {
-        const errText = await spawnRes.text();
-        console.warn(`[execSpawnAgent] /run-subagent returned ${spawnRes.status}: ${errText}`);
+    const { workflowRunId } = await wfClient.trigger({
+      url: `${workerBase}/workflow`,
+      body: payload,
+    });
 
-        // Mark as error in Redis
-        await redis.set(`agent:config:${agentId}`, JSON.stringify({ ...agentRecord, status: "error", error: `Dispatch failed: ${spawnRes.status}` }), { ex: 60 * 60 * 24 * 30 });
-      }
-    } else {
-      console.warn(`[execSpawnAgent] UPSTASH_WORKFLOW_URL not set — cannot dispatch sub-agent ${agentId}`);
-    }
+    console.log(`[execSpawnAgent] ${agentId} dispatched to /workflow (workflowRunId: ${workflowRunId})`);
   } catch (e) {
-    console.error(`[execSpawnAgent] Self-call failed for ${agentId}:`, String(e));
+    console.error(`[execSpawnAgent] Workflow trigger failed for ${agentId}:`, String(e));
+    const errorMsg = `Workflow dispatch failed: ${String(e)}`;
+    await redis.set(`agent:config:${agentId}`, JSON.stringify({ ...agentRecord, status: "error", error: errorMsg }), { ex: 60 * 60 * 24 * 30 });
+    const { updateTask } = await import("../memory");
+    await updateTask(redis, agentId, { status: "error", result: { error: errorMsg, failedAt: new Date().toISOString() } }).catch(() => {});
   }
 
   return {
@@ -1840,49 +2050,74 @@ export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<
 
   const originalConfig = savedRecord.agentConfig;
 
-  // Spawn a new workflow execution reusing the same identity and memory namespace
-  const newTaskId = `${agentId}-invoke-${Date.now()}`;
-  const qstash = new QStashClient({
-    token: env.QSTASH_TOKEN,
-    baseUrl: env.QSTASH_URL,
-  });
+  // Dispatch via Upstash Workflow — same durable, per-step QStash path as spawn_agent.
+  // Each agentic iteration is a separate context.run() step so there is no cumulative
+  // Worker timeout regardless of how long the task takes.
+  const invokeTaskId = `${agentId}-invoke-${Date.now()}`;
+  const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
 
-  const workflowBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-  await qstash.publishJSON({
-    url: `${workflowBase}/workflow`,
-    body: {
-      taskId: newTaskId,
-      sessionId: `agent-${agentId}`,  // Same session = same memory
-      taskType: "sub_agent",
-      instructions,
-      steps: [],
-      agentConfig: {
-        ...originalConfig,
-        // Update spawnedAt for this invocation but keep the rest identical
-        spawnedAt: new Date().toISOString(),
-      },
+  const invokePayload = {
+    taskId: invokeTaskId,
+    sessionId: `agent-${agentId}`, // Same session = same memory namespace
+    taskType: "sub_agent",
+    instructions,
+    steps: [],
+    agentConfig: {
+      ...originalConfig,
+      spawnedAt: new Date().toISOString(),
     },
-  });
+  };
 
-  // Track this invocation in Redis too
+  // Eagerly create the task record so get_agent_result works immediately
+  const { createTask, updateTask } = await import("../memory");
+  await createTask(redis, {
+    id: invokeTaskId,
+    type: "sub_agent",
+    payload: { instructions, agentConfig: originalConfig },
+    status: "running",
+  }).catch((e) => console.warn("[execInvokeAgent] pre-createTask failed:", String(e)));
+
+  // Track this invocation in the spawned list
   await redis.lpush("agent:spawned", JSON.stringify({
-    agentId: newTaskId,
+    agentId: invokeTaskId,
     agentName: `${originalConfig.name} (reinvoked)`,
     spawnedAt: new Date().toISOString(),
-    status: "initializing",
+    status: "running",
     originalAgentId: agentId,
     agentConfig: originalConfig,
   }));
   await redis.ltrim("agent:spawned", 0, 199);
 
+  // Trigger the Upstash Workflow — QStash will deliver it to /workflow and
+  // run each agentic iteration as a separate context.run() step.
+  if (!workerBase) {
+    await updateTask(redis, invokeTaskId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => {});
+    return { success: false, error: "UPSTASH_WORKFLOW_URL is not configured — cannot dispatch agent invocation." };
+  }
+
+  try {
+    const { Client: WorkflowClient } = await import("@upstash/workflow");
+    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
+
+    const { workflowRunId } = await wfClient.trigger({
+      url: `${workerBase}/workflow`,
+      body: invokePayload,
+    });
+
+    console.log(`[execInvokeAgent] ${invokeTaskId} dispatched to /workflow (workflowRunId: ${workflowRunId})`);
+  } catch (e) {
+    console.error(`[execInvokeAgent] Workflow trigger failed for ${invokeTaskId}:`, String(e));
+    await updateTask(redis, invokeTaskId, { status: "error", result: { error: String(e), failedAt: new Date().toISOString() } }).catch(() => {});
+  }
+
   return {
     success: true,
-    newTaskId,
+    newTaskId: invokeTaskId,
     originalAgentId: agentId,
     agentName: originalConfig.name,
     memoryPrefix: originalConfig.memoryPrefix,
-    message: `Agent '${originalConfig.name}' reinvoked with the same memory namespace (${originalConfig.memoryPrefix}). New task ID: ${newTaskId}.`,
-    instructions: `Poll: get_agent_result('${newTaskId}')`,
+    message: `Agent '${originalConfig.name}' reinvoked with same memory namespace (${originalConfig.memoryPrefix}). New task: ${invokeTaskId}.`,
+    instructions: `Poll: get_agent_result('${invokeTaskId}')`,
   };
 }
 

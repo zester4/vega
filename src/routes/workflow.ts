@@ -100,9 +100,36 @@ export async function workflowHandler(context: WorkflowContext): Promise<void> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SUB-AGENT HANDLER
-// Runs a full autonomous agenticLoop — has access to ALL tools
+// SUB-AGENT HANDLER — Multi-step durable execution
+//
+// Architecture:
+//   Each agentic iteration (one Gemini call + tool execution) runs as its OWN
+//   context.run() step. This means:
+//   - Each Worker invocation only runs ONE step (~10-30 seconds)
+//   - QStash orchestrates the hand-off between steps automatically
+//   - A 10-step agent can run for minutes/hours with zero timeout risk
+//   - State (contents array) is persisted in Redis between steps
+//
+// Flow: wf-init → wf-iter-0 → wf-iter-1 → ... → wf-iter-N → wf-finalize
+//       (each step = one QStash-managed Worker invocation)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/** Ensure any tool result is a plain JSON object (Gemini protobuf Struct requirement). */
+function ensureObject(value: unknown): Record<string, unknown> {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (Array.isArray(value)) return { items: value };
+  if (value === null || value === undefined) return { result: null };
+  return { result: String(value) };
+}
+
+type WfState = {
+  contents: unknown[];      // RawContent[] — serialized to Redis between steps
+  systemPrompt: string;
+  done: boolean;
+  finalText: string | null;
+};
 
 async function handleSubAgent(
   context: WorkflowContext,
@@ -112,36 +139,164 @@ async function handleSubAgent(
   instructions: string,
   agentConfig: AgentConfig
 ): Promise<void> {
-  console.log(`[SubAgent] ${taskId} (${agentConfig.name}) starting autonomous loop`);
+  console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) starting multi-step execution`);
 
-  const result: string = await context.run("agent-execute", async () => {
-    // Import here (inside context.run) to avoid serialization issues
-    const { runAgent } = await import("../agent");
+  const MAX_ITERATIONS = 12;
+  const stateKey = `agent:wf-state:${taskId}`;
 
-    // Build a system prompt specialized for this sub-agent's role
-    const subAgentSystemPrompt = buildSubAgentPrompt(agentConfig);
+  // ── Step 0: Initialise conversation state in Redis ──────────────────────────
+  await context.run("wf-init", async () => {
+    const { getHistory } = await import("../memory");
+    const { buildSubAgentPrompt } = await import("./subagent");
 
-    // Run the full agentic loop — this agent has all tools
-    const reply = await runAgent(
-      env,
-      `subagent-${taskId}`,
-      instructions,
-      subAgentSystemPrompt,
-      // onEvent: sub-agents don't stream events back (fire-and-forget)
-      undefined,
-      // Tool filter: if allowedTools is set, only pass those declarations
-      agentConfig.allowedTools ?? undefined,
-      // Attachments are not used for background sub-agents today
-      undefined
-    );
+    const history = await getHistory(redis, `subagent-${taskId}`);
+    const systemPrompt = buildSubAgentPrompt(agentConfig);
 
-    return reply;
+    // Build initial contents: recent history + the current instruction
+    const contents: unknown[] = [
+      ...history.slice(-10).map((m: { role: string; parts: { text: string }[] }) => ({
+        role: m.role,
+        parts: m.parts,
+      })),
+      { role: "user", parts: [{ text: instructions }] },
+    ];
+
+    const state: WfState = { contents, systemPrompt, done: false, finalText: null };
+    await redis.set(stateKey, JSON.stringify(state), { ex: 7200 }); // 2h TTL
+    console.log(`[SubAgent WF] ${taskId} state initialised — ${contents.length} content items`);
+    return { ok: true };
   });
 
-  // Persist result and notify
-  await context.run("agent-finalize", async () => {
+  // ── Steps 1..N: One agentic iteration per step ──────────────────────────────
+  // Each context.run() is a SEPARATE Worker invocation — no cumulative timeout.
+  let finalText = "";
+
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    type IterResult = { done: boolean; text: string; toolsCalled: string[] };
+
+    const stepResult: IterResult = await context.run(`wf-iter-${i}`, async () => {
+      const { generateWithTools } = await import("../gemini");
+      const { executeTool, BUILTIN_DECLARATIONS } = await import("../tools/builtins");
+      const { listTools } = await import("../memory");
+
+      // Load persisted state
+      const stateRaw = await redis.get<string>(stateKey);
+      if (!stateRaw) {
+        return { done: true, text: "[Workflow state expired — Redis TTL hit]", toolsCalled: [] as string[] };
+      }
+      const state: WfState = JSON.parse(String(stateRaw));
+      if (state.done) {
+        return { done: true, text: state.finalText ?? "", toolsCalled: [] as string[] };
+      }
+
+      // Build tool list (built-ins + any dynamically registered tools)
+      const customTools = await listTools(redis);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let allTools: any[] = [
+        ...BUILTIN_DECLARATIONS,
+        ...customTools.map((t: { name: string; description: string; parameters: unknown }) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        })),
+      ];
+      if (agentConfig.allowedTools?.length) {
+        const allowed = new Set(agentConfig.allowedTools);
+        allTools = allTools.filter((t) => allowed.has(t.name));
+      }
+
+      // ── ONE Gemini call ─────────────────────────────────────────────────────
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { rawContent, functionCalls, text } = await generateWithTools(
+        env.GEMINI_API_KEY,
+        state.contents as never,
+        allTools as never,
+        state.systemPrompt
+      );
+
+      // MUST append rawContent with thoughtSignatures intact (Gemini spec)
+      state.contents.push(rawContent);
+
+      // No tool calls → final answer
+      if (functionCalls.length === 0) {
+        state.done = true;
+        state.finalText = text;
+        await redis.set(stateKey, JSON.stringify(state), { ex: 7200 });
+        return { done: true, text, toolsCalled: [] as string[] };
+      }
+
+      console.log(`[SubAgent WF] ${taskId} iter-${i} calling: ${functionCalls.map((f: { name: string }) => f.name).join(", ")}`);
+
+      // ── Execute all tool calls in parallel ──────────────────────────────────
+      const toolResults = await Promise.all(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        functionCalls.map(async (fc: { name: string; args: Record<string, unknown> }) => {
+          try {
+            const result = await executeTool(fc.name, fc.args, env);
+            return { name: fc.name, result };
+          } catch (e) {
+            return { name: fc.name, result: { error: String(e) } };
+          }
+        })
+      );
+
+      // Append function responses (protobuf Struct: MUST be plain objects)
+      const responseParts = toolResults.map((r) => ({
+        functionResponse: {
+          name: r.name,
+          response: ensureObject(r.result),
+        },
+      }));
+      state.contents.push({ role: "user", parts: responseParts });
+
+      // Persist updated state for next step
+      await redis.set(stateKey, JSON.stringify(state), { ex: 7200 });
+
+      return {
+        done: false,
+        text: "",
+        toolsCalled: functionCalls.map((f: { name: string }) => f.name),
+      };
+    });
+
+    // Update progress visible to get_agent_result
+    await updateTask(redis, taskId, {
+      result: {
+        completedSteps: i + 1,
+        totalSteps: MAX_ITERATIONS,
+        latestResult: stepResult.toolsCalled?.length
+          ? `Called: ${stepResult.toolsCalled.join(", ")}`
+          : (stepResult.text?.slice(0, 300) ?? "Working..."),
+      },
+    }).catch(() => { });
+
+    if (stepResult.done) {
+      finalText = stepResult.text ?? "";
+      break;
+    }
+  }
+
+  // ── Finalise: write results, notify parent ──────────────────────────────────
+  await context.run("wf-finalize", async () => {
+    let result = finalText;
+
+    // If no text emerged (loop exhausted without clean termination), synthesise
+    if (!result) {
+      const { think } = await import("../gemini");
+      const stateRaw = await redis.get<string>(stateKey);
+      const sysPrompt = stateRaw
+        ? (JSON.parse(String(stateRaw)) as WfState).systemPrompt
+        : "You are a helpful assistant.";
+      result = await think(
+        env.GEMINI_API_KEY,
+        `Summarise what was accomplished for this task:\n\n${instructions}`,
+        sysPrompt
+      ).catch(() => "Agent completed the task.");
+    }
+
     const completedAt = new Date().toISOString();
 
+    // Mark task done in Redis
     await updateTask(redis, taskId, {
       status: "done",
       result: {
@@ -152,7 +307,7 @@ async function handleSubAgent(
       },
     });
 
-    // Write result to shared memory namespace so parent can find it
+    // Write to shared memory namespace so parent agent can find results
     try {
       const { Redis } = await import("@upstash/redis/cloudflare");
       const sharedRedis = Redis.fromEnv(env);
@@ -160,15 +315,15 @@ async function handleSubAgent(
         `agent:shared:${agentConfig.memoryPrefix}:result`,
         JSON.stringify({ summary: result, completedAt })
       );
-      await sharedRedis.set(
-        `agent:shared:${agentConfig.memoryPrefix}:status`,
-        "done"
-      );
+      await sharedRedis.set(`agent:shared:${agentConfig.memoryPrefix}:status`, "done");
     } catch (e) {
-      console.warn(`[SubAgent] Failed to write shared memory: ${String(e)}`);
+      console.warn(`[SubAgent WF] Shared memory write failed: ${String(e)}`);
     }
 
-    // Email notification if requested
+    // Clean up workflow state from Redis
+    await redis.del(stateKey).catch(() => { });
+
+    // Email notification if configured
     if (agentConfig.notifyEmail) {
       try {
         const { executeTool } = await import("../tools/builtins");
@@ -178,55 +333,31 @@ async function handleSubAgent(
           body: `**Task ID:** ${taskId}\n**Agent:** ${agentConfig.name}\n**Completed:** ${completedAt}\n\n**Result:**\n\n${result}`,
         }, env);
       } catch (e) {
-        console.warn(`[SubAgent] Email notification failed: ${String(e)}`);
+        console.warn(`[SubAgent WF] Email failed: ${String(e)}`);
       }
     }
 
-    // Notify via webhook if UPSTASH_WORKFLOW_URL is set
+    // Best-effort webhook to notify parent
     try {
-      await fetch(`${env.UPSTASH_WORKFLOW_URL}/webhook/task-complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          taskId,
-          agentName: agentConfig.name,
-          status: "done",
-          summary: result.slice(0, 500),
-          completedAt,
-        }),
-      });
-    } catch {
-      // Non-fatal — webhook is best-effort
-    }
+      const base = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+      if (base) {
+        await fetch(`${base}/webhook/task-complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            taskId,
+            agentName: agentConfig.name,
+            status: "done",
+            summary: result.slice(0, 500),
+            completedAt,
+          }),
+        });
+      }
+    } catch { /* non-fatal */ }
 
-    console.log(`[SubAgent] ${taskId} (${agentConfig.name}) completed.`);
-    return { done: true };
+    console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) DONE.`);
+    return { done: true, completedAt };
   });
-}
-
-function buildSubAgentPrompt(config: AgentConfig): string {
-  const toolRestriction = config.allowedTools
-    ? `\nYou have access ONLY to these tools: ${config.allowedTools.join(", ")}.`
-    : "\nYou have access to ALL tools.";
-
-  return `You are ${config.name.toUpperCase()}, a specialized autonomous sub-agent created by VEGA.
-
-Your role: ${config.name}
-Your memory namespace: ${config.memoryPrefix}
-Parent agent: ${config.parentAgent}
-${toolRestriction}
-
-Core rules for sub-agents:
-1. Focus EXCLUSIVELY on your assigned task — don't go off-topic
-2. Store all important findings using store_memory with prefix '${config.memoryPrefix}:'
-3. Store complex findings using semantic_store for later retrieval
-4. Use share_memory(namespace='${config.memoryPrefix}', ...) to publish results for the parent
-5. Write final reports to write_file('reports/${config.memoryPrefix}-result.md')
-6. Be thorough — you are running autonomously so produce complete, actionable output
-7. Cite sources (URLs) when using web data
-8. Structure your final response as a clear, well-organized report
-
-You are running in AUTONOMOUS mode. Complete your task fully before returning.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

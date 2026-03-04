@@ -846,7 +846,10 @@ app.post("/workflow", async (c) => {
 // Protected by TELEGRAM_INTERNAL_SECRET to prevent abuse.
 app.post("/run-subagent", async (c) => {
   const secret = c.req.header("X-Internal-Secret");
-  if (!c.env.TELEGRAM_INTERNAL_SECRET || secret !== c.env.TELEGRAM_INTERNAL_SECRET) {
+  // If TELEGRAM_INTERNAL_SECRET is not configured, allow all internal calls (dev mode).
+  // If it IS configured, enforce the secret to prevent abuse.
+  const configuredSecret = c.env.TELEGRAM_INTERNAL_SECRET;
+  if (configuredSecret && secret !== configuredSecret) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 

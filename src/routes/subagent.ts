@@ -23,7 +23,7 @@
  * ============================================================================
  */
 
-import { getRedis, createTask, updateTask } from "../memory";
+import { getRedis, createTask, updateTask, getTask } from "../memory";
 import type { AgentConfig } from "./workflow";
 
 export type SubAgentPayload = {
@@ -69,21 +69,28 @@ export async function runSubAgentTask(env: Env, payload: SubAgentPayload): Promi
     const { taskId, sessionId, instructions, agentConfig } = payload;
     const redis = getRedis(env);
 
-    // Mark as running
+    // Ensure task record exists and is marked running.
+    // execSpawnAgent pre-creates the task record eagerly, so we use
+    // getTask + upsert logic to avoid overwriting an already-running record.
     try {
-        await createTask(redis, {
-            id: taskId,
-            type: "sub_agent",
-            payload: { instructions, agentConfig },
-            status: "running",
-        });
+        const existing = await getTask(redis, taskId);
+        if (!existing) {
+            await createTask(redis, {
+                id: taskId,
+                type: "sub_agent",
+                payload: { instructions, agentConfig },
+                status: "running",
+            });
+        } else {
+            // Record already created by execSpawnAgent — just ensure it’s running
+            await updateTask(redis, taskId, { status: "running" });
+        }
     } catch (e) {
-        console.error(`[SubAgent] ${taskId} failed to create task record:`, e);
-        // Try to at least write an error record
+        console.error(`[SubAgent] ${taskId} failed to init task record:`, e);
         try {
             await updateTask(redis, taskId, {
                 status: "error",
-                result: { error: `Task creation failed: ${String(e)}`, failedAt: new Date().toISOString() },
+                result: { error: `Task init failed: ${String(e)}`, failedAt: new Date().toISOString() },
             });
         } catch { /* ignore */ }
         return;
