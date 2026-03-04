@@ -1,311 +1,329 @@
 "use client";
 
-/**
- * app/agents/page.tsx — VEGA Sub-agents Dashboard
- *
- * Displays a list of all autonomous sub-agents spawned by the core agent.
- * Polling allows live status updates.
- */
-
 import { useState, useEffect, useCallback } from "react";
-import {
-    BotIcon,
-    RefreshCwIcon,
-    ClockIcon,
-    CheckCircle2Icon,
-    XCircleIcon,
-    PlayCircleIcon,
-    ChevronRightIcon,
-    SearchIcon,
-    AlertCircleIcon,
-    Trash2Icon,
-    ExternalLinkIcon
-} from "lucide-react";
-import Link from "next/link";
-import { motion, AnimatePresence } from "motion/react";
-// ─── Types ────────────────────────────────────────────────────────────────────
 
-interface SubAgent {
+interface AgentConfig {
+    name: string;
+    allowedTools: string[] | null;
+    memoryPrefix: string;
+    notifyEmail: string | null;
+    spawnedAt: string;
+    parentAgent: string;
+}
+
+interface Agent {
     agentId: string;
     agentName: string;
     spawnedAt: string;
-    status: "initializing" | "running" | "done" | "error" | "cancelled";
-    completedAt?: string;
+    status: "initializing" | "running" | "done" | "error" | "cancelled" | "scheduled";
     summary?: string;
+    completedAt?: string;
+    scheduledFor?: string | null;
+    scheduledAt?: string;
+    originalAgentId?: string;
+    agentConfig?: AgentConfig;
+    // Live task fields (merged from Redis task:*)
+    taskStatus?: string;
+    taskSummary?: string;
     progress?: string;
 }
 
-// ─── API Helper ───────────────────────────────────────────────────────────────
+const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
+    running: { bg: "bg-blue-500/10", text: "text-blue-400", dot: "bg-blue-400 animate-pulse" },
+    initializing: { bg: "bg-yellow-500/10", text: "text-yellow-400", dot: "bg-yellow-400 animate-pulse" },
+    done: { bg: "bg-emerald-500/10", text: "text-emerald-400", dot: "bg-emerald-400" },
+    error: { bg: "bg-red-500/10", text: "text-red-400", dot: "bg-red-500" },
+    cancelled: { bg: "bg-zinc-600/20", text: "text-zinc-400", dot: "bg-zinc-500" },
+    scheduled: { bg: "bg-violet-500/10", text: "text-violet-400", dot: "bg-violet-400" },
+};
 
-async function fetchAgents(status = "all"): Promise<SubAgent[]> {
-    const res = await fetch(`/api/agents?status=${status}`);
-    if (!res.ok) throw new Error("Failed to fetch agents");
-    const data = await res.json() as { agents: SubAgent[] };
-    return data.agents || [];
+function StatusBadge({ status }: { status: string }) {
+    const c = STATUS_COLORS[status] ?? STATUS_COLORS.initializing;
+    return (
+        <span className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${c.bg} ${c.text}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
+            {status}
+        </span>
+    );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+function timeAgo(iso: string): string {
+    const diff = Date.now() - new Date(iso).getTime();
+    const s = Math.floor(diff / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+}
 
 export default function AgentsPage() {
-    const [agents, setAgents] = useState<SubAgent[]>([]);
+    const [agents, setAgents] = useState<Agent[]>([]);
+    const [filter, setFilter] = useState<string>("all");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [filter, setFilter] = useState("all");
-    const [search, setSearch] = useState("");
+    const [invoking, setInvoking] = useState<string | null>(null);
+    const [invokeText, setInvokeText] = useState<Record<string, string>>({});
+    const [showInvokeFor, setShowInvokeFor] = useState<string | null>(null);
 
-    const loadData = useCallback(async () => {
+    const fetchAgents = useCallback(async () => {
         try {
-            const data = await fetchAgents(filter);
-            setAgents(data);
+            const res = await fetch(`/api/agents?status=${filter}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json() as { agents: Agent[]; count: number };
+            setAgents(data.agents ?? []);
             setError(null);
-        } catch (err) {
-            setError(String(err));
+        } catch (e) {
+            setError(String(e));
         } finally {
             setLoading(false);
         }
     }, [filter]);
 
-    // Initial load + Polling
+    useEffect(() => { fetchAgents(); }, [fetchAgents]);
+
+    // Auto-refresh every 6 seconds while any agent is running/initializing
     useEffect(() => {
-        loadData();
-        const interval = setInterval(loadData, 5000); // Poll every 5s
-        return () => clearInterval(interval);
-    }, [loadData]);
+        const hasActive = agents.some(a => a.status === "running" || a.status === "initializing");
+        if (!hasActive) return;
+        const id = setInterval(fetchAgents, 6000);
+        return () => clearInterval(id);
+    }, [agents, fetchAgents]);
 
-    const filteredAgents = agents
-        .filter(a =>
-            search === "" ||
-            a.agentName.toLowerCase().includes(search.toLowerCase()) ||
-            a.agentId.toLowerCase().includes(search.toLowerCase())
-        )
-        .sort((a, b) => new Date(b.spawnedAt).getTime() - new Date(a.spawnedAt).getTime());
+    const handleInvoke = async (agentId: string) => {
+        const instructions = invokeText[agentId];
+        if (!instructions?.trim()) return;
+        setInvoking(agentId);
 
-    return (
-        <div className="max-w-6xl mx-auto px-4 py-6 sm:py-8 space-y-6 sm:space-y-8">
-            {/* Header */}
-            <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex flex-col md:flex-row md:items-center justify-between gap-4"
-            >
-                <div>
-                    <h1 className="text-xl sm:text-2xl font-bold text-[#e8e8ea] flex items-center gap-2">
-                        <BotIcon className="size-5 sm:size-6 text-[#00e5cc]" />
-                        Sub-agents
-                    </h1>
-                    <p className="text-xs sm:text-sm text-[#6b6b7a] mt-1">
-                        Monitor and manage parallel autonomous tasks.
-                    </p>
-                </div>
-
-                <div className="flex items-center gap-2 w-full md:w-auto">
-                    <div className="relative flex-1 md:flex-none">
-                        <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-[#3a3a44]" />
-                        <input
-                            type="text"
-                            placeholder="Search agents..."
-                            value={search}
-                            onChange={(e) => setSearch(e.target.value)}
-                            className="w-full bg-[#0d0d10] border border-[#1e1e22] rounded-lg pl-9 pr-4 py-2 text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none focus:border-[#00e5cc]/50 focus:ring-1 focus:ring-[#00e5cc]/20 transition-all md:w-64"
-                        />
-                    </div>
-                    <button
-                        onClick={() => { setLoading(true); loadData(); }}
-                        className="p-2.5 rounded-lg border border-[#1e1e22] bg-[#0d0d10] hover:bg-[#1e1e22] hover:border-[#3a3a44] transition-all group shrink-0"
-                        title="Refresh list"
-                    >
-                        <RefreshCwIcon className={`size-4 text-[#6b6b7a] group-hover:text-[#e8e8ea] ${loading ? 'animate-spin text-[#00e5cc]' : ''}`} />
-                    </button>
-                </div>
-            </motion.div>
-
-            {/* Filter Tabs */}
-            <div className="flex items-center gap-1 border-b border-[#1e1e22]">
-                {["all", "running", "done", "error"].map((f) => (
-                    <button
-                        key={f}
-                        onClick={() => setFilter(f)}
-                        className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 capitalize ${filter === f
-                            ? "text-[#00e5cc] border-[#00e5cc]"
-                            : "text-[#6b6b7a] border-transparent hover:text-[#e8e8ea]"
-                            }`}
-                    >
-                        {f}
-                    </button>
-                ))}
-            </div>
-
-            {/* Error State */}
-            {error && (
-                <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/20 flex items-center gap-3 text-red-400">
-                    <AlertCircleIcon className="size-5 shrink-0" />
-                    <p className="text-sm">{error}</p>
-                    <button onClick={loadData} className="ml-auto text-xs underline font-medium">Retry</button>
-                </div>
-            )}
-
-            {/* Agents Grid */}
-            {loading && agents.length === 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {[1, 2, 3].map(i => (
-                        <div key={i} className="h-[210px] rounded-xl border border-[#1e1e22] bg-[#0d0d10]/50 animate-pulse" />
-                    ))}
-                </div>
-            ) : filteredAgents.length === 0 ? (
-                <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="py-16 sm:py-24 text-center rounded-xl border border-[#1e1e22] border-dashed bg-[#0d0d10]/30"
-                >
-                    <BotIcon className="size-12 text-[#1e1e22] mx-auto mb-4" />
-                    <h3 className="text-lg font-bold text-[#e8e8ea]">No sub-agents found</h3>
-                    <p className="text-sm text-[#6b6b7a] mt-2 max-w-sm mx-auto">
-                        Spawn an agent in chat using "spawn a sub-agent to..."
-                    </p>
-                </motion.div>
-            ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                    <AnimatePresence>
-                        {filteredAgents.map((agent, index) => (
-                            <motion.div
-                                key={agent.agentId}
-                                initial={{ opacity: 0, y: 15 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, scale: 0.95 }}
-                                transition={{ delay: Math.min(index * 0.05, 0.4) }}
-                            >
-                                <AgentCard agent={agent} />
-                            </motion.div>
-                        ))}
-                    </AnimatePresence>
-                </div>
-            )}
-        </div>
-    );
-}
-
-// ─── Agent Card Component ──────────────────────────────────────────────────────
-
-function AgentCard({ agent }: { agent: SubAgent }) {
-    const isRunning = agent.status === "running" || agent.status === "initializing";
-    const isDone = agent.status === "done";
-    const isError = agent.status === "error";
-    const isCancelled = agent.status === "cancelled";
-
-    return (
-        <div className="group flex flex-col h-full rounded-xl border border-[#1e1e22] bg-[#0d0d10]/90 backdrop-blur-md hover:border-[#3a3a44] hover:shadow-lg transition-all overflow-hidden relative">
-            {isRunning && (
-                <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-blue-500/0 via-blue-500/50 to-blue-500/0 animate-scan"></div>
-            )}
-            {/* Top section: Status & Icon */}
-            <div className="p-4 sm:p-5 flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                    <div className={`p-2.5 rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] shrink-0 ${isRunning ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" :
-                        isDone ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
-                            isError ? "bg-red-500/10 text-red-400 border border-red-500/20" :
-                                "bg-[#1e1e22] text-[#6b6b7a] border border-[#2a2a30]"
-                        }`}>
-                        <BotIcon className="size-5" />
-                    </div>
-                    <div className="min-w-0">
-                        <h3 className="text-sm font-bold text-[#e8e8ea] truncate" title={agent.agentName}>
-                            {agent.agentName}
-                        </h3>
-                        <p className="text-[10px] text-[#6b6b7a] font-mono truncate mt-0.5" title={agent.agentId}>
-                            {agent.agentId}
-                        </p>
-                    </div>
-                </div>
-
-                <StatusBadge status={agent.status} />
-            </div>
-
-            {/* Middle section: Info */}
-            <div className="px-4 sm:px-5 pb-4 flex-1 space-y-4">
-                <div className="flex items-center gap-1.5 text-xs font-medium text-[#6b6b7a] bg-[#111113] w-fit px-2 py-1 rounded-md border border-[#1e1e22]">
-                    <ClockIcon className="size-3" />
-                    <span>Spawned {formatRelativeTime(agent.spawnedAt)}</span>
-                </div>
-
-                {isRunning && agent.progress && (
-                    <div className="space-y-2 bg-[#111113] p-3 rounded-lg border border-[#1e1e22]">
-                        <div className="flex justify-between items-center">
-                            <span className="text-[10px] font-bold text-[#6b6b7a] uppercase tracking-wider">Progress</span>
-                            <span className="text-[10px] font-bold text-[#00e5cc]">{agent.progress}</span>
-                        </div>
-                        <div className="h-1.5 w-full bg-[#0a0a0b] rounded-full overflow-hidden shadow-inner flex">
-                            <div
-                                className="h-full bg-gradient-to-r from-[#00e5cc] to-[#22d3ee] transition-all duration-1000 ease-in-out relative"
-                                style={{ width: agent.progress.includes('%') ? agent.progress : '10%' }}
-                            >
-                                <div className="absolute top-0 right-0 bottom-0 w-10 bg-gradient-to-r from-transparent to-white/30 truncate"></div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {agent.summary && (
-                    <div className="p-3 rounded-lg bg-[#0a0a0b] border border-[#1e1e22] group-hover:border-[#2a2a30] transition-colors relative">
-                        <div className="absolute top-3 left-3 w-1 h-full max-h-[calc(100%-24px)] bg-[#1e1e22] rounded-full"></div>
-                        <p className="text-xs text-[#8b8b9a] line-clamp-3 leading-relaxed italic pl-3 relative z-10">
-                            "{agent.summary}"
-                        </p>
-                    </div>
-                )}
-            </div>
-
-            {/* Bottom section: Actions */}
-            <div className="p-4 mt-auto border-t border-[#1e1e22] bg-[#111113]/80 flex items-center justify-between gap-3">
-                <Link
-                    href={`/task/${agent.agentId}`}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[#1e1e22] hover:bg-[#00e5cc] text-[#e8e8ea] hover:text-[#0a0a0b] text-xs font-bold transition-all group/btn shadow-sm"
-                >
-                    View Details
-                    <ChevronRightIcon className="size-3 transition-transform group-hover/btn:translate-x-1" />
-                </Link>
-
-                {isRunning && (
-                    <button className="p-2 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 hover:border-red-500/40 transition-all shrink-0 bg-[#0a0a0b]" title="Cancel Agent">
-                        <XCircleIcon className="size-4" />
-                    </button>
-                )}
-            </div>
-        </div>
-    );
-}
-
-function StatusBadge({ status }: { status: SubAgent["status"] }) {
-    const configs: Record<string, { icon: any, color: string, label: string, animate?: boolean }> = {
-        initializing: { icon: ClockIcon, color: "text-blue-400 bg-blue-400/10 border-blue-400/20", label: "Initial" },
-        running: { icon: RefreshCwIcon, color: "text-blue-400 bg-blue-400/10 border-blue-400/20", label: "Running", animate: true },
-        done: { icon: CheckCircle2Icon, color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/20", label: "Success" },
-        error: { icon: XCircleIcon, color: "text-red-400 bg-red-400/10 border-red-400/20", label: "Failed" },
-        cancelled: { icon: PlayCircleIcon, color: "text-[#6b6b7a] bg-[#1e1e22] border-[#2a2a30]", label: "Stopped" },
+        try {
+            const res = await fetch(`/api/agents/${agentId}/invoke`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ instructions }),
+            });
+            const data = await res.json() as { success?: boolean; newTaskId?: string; error?: string };
+            if (data.success) {
+                setShowInvokeFor(null);
+                setInvokeText(prev => ({ ...prev, [agentId]: "" }));
+                setTimeout(fetchAgents, 1500);
+            } else {
+                alert(data.error ?? "Failed to invoke agent");
+            }
+        } catch (e) {
+            alert(String(e));
+        } finally {
+            setInvoking(null);
+        }
     };
 
-    const config = configs[status] || configs.initializing;
-    const Icon = config.icon;
+    const filtered = filter === "all" ? agents : agents.filter(a => a.status === filter);
 
     return (
-        <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider ${config.color}`}>
-            <Icon className={`size-2.5 ${config.animate ? 'animate-spin' : ''}`} />
-            {config.label}
+        <div className="min-h-screen bg-[#0a0a0f] text-white px-4 py-8">
+            <div className="max-w-5xl mx-auto">
+
+                {/* Header */}
+                <div className="flex items-center justify-between mb-8">
+                    <div>
+                        <h1 className="text-2xl font-bold bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent">
+                            Agents
+                        </h1>
+                        <p className="text-sm text-zinc-500 mt-1">
+                            Spawned sub-agents — running, completed, and scheduled
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => { setLoading(true); fetchAgents(); }}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm transition-colors"
+                    >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+
+                {/* Filter Tabs */}
+                <div className="flex gap-1 mb-6 bg-zinc-900 rounded-lg p-1 w-fit">
+                    {["all", "running", "initializing", "done", "error", "scheduled"].map(f => (
+                        <button
+                            key={f}
+                            onClick={() => setFilter(f)}
+                            className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${filter === f
+                                    ? "bg-violet-600 text-white"
+                                    : "text-zinc-400 hover:text-white"
+                                }`}
+                        >
+                            {f}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Content */}
+                {loading && (
+                    <div className="flex items-center justify-center py-24">
+                        <div className="flex flex-col items-center gap-3">
+                            <div className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                            <p className="text-zinc-500 text-sm">Loading agents…</p>
+                        </div>
+                    </div>
+                )}
+
+                {error && (
+                    <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-4 text-red-400 text-sm">
+                        ⚠️ {error}
+                    </div>
+                )}
+
+                {!loading && !error && filtered.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-24 text-center">
+                        <div className="w-16 h-16 rounded-2xl bg-zinc-800 flex items-center justify-center mb-4 text-3xl">🤖</div>
+                        <p className="text-zinc-400 font-medium">No agents found</p>
+                        <p className="text-zinc-600 text-sm mt-1">
+                            {filter === "all"
+                                ? "Ask VEGA to spawn a sub-agent to see it here."
+                                : `No agents with status "${filter}".`}
+                        </p>
+                    </div>
+                )}
+
+                {!loading && filtered.length > 0 && (
+                    <div className="space-y-3">
+                        {filtered.map(agent => {
+                            const color = STATUS_COLORS[agent.status] ?? STATUS_COLORS.initializing;
+                            const isInvoking = invoking === agent.agentId;
+                            const showInvoke = showInvokeFor === agent.agentId;
+                            const canInvoke = agent.status === "done" || agent.status === "error" || agent.status === "cancelled";
+
+                            return (
+                                <div
+                                    key={agent.agentId}
+                                    className={`rounded-xl border border-zinc-800 bg-zinc-900/50 p-5 transition-colors hover:border-zinc-700 ${agent.status === "running" ? "ring-1 ring-blue-500/20" : ""
+                                        }`}
+                                >
+                                    <div className="flex items-start gap-4">
+                                        {/* Icon */}
+                                        <div className={`mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${color.bg}`}>
+                                            <span className="text-base">
+                                                {agent.status === "done" ? "✅" :
+                                                    agent.status === "error" ? "❌" :
+                                                        agent.status === "scheduled" ? "⏰" :
+                                                            agent.status === "cancelled" ? "🚫" :
+                                                                "🤖"}
+                                            </span>
+                                        </div>
+
+                                        {/* Main content */}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-3 flex-wrap">
+                                                <span className="font-semibold text-white truncate">{agent.agentName}</span>
+                                                <StatusBadge status={agent.status} />
+                                                {agent.originalAgentId && (
+                                                    <span className="text-xs text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded-full">reinvoked</span>
+                                                )}
+                                                {agent.agentConfig?.allowedTools && (
+                                                    <span className="text-xs text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded-full">
+                                                        🔧 {agent.agentConfig.allowedTools.length} tools
+                                                    </span>
+                                                )}
+                                            </div>
+
+                                            {/* Scheduled */}
+                                            {agent.status === "scheduled" && agent.scheduledAt && (
+                                                <div className="mt-2 text-xs text-violet-400 bg-violet-500/10 rounded-lg px-3 py-1.5">
+                                                    ⏰ Scheduled for: {new Date(agent.scheduledAt).toLocaleString()}
+                                                </div>
+                                            )}
+
+                                            {/* Progress */}
+                                            {(agent.status === "running" || agent.status === "initializing") && agent.progress && (
+                                                <div className="mt-2 text-xs text-blue-400">{agent.progress}</div>
+                                            )}
+
+                                            {/* Summary */}
+                                            {agent.summary && (
+                                                <div className="mt-2 text-sm text-zinc-400 bg-zinc-800/50 rounded-lg px-3 py-2 leading-relaxed line-clamp-3">
+                                                    {agent.summary}
+                                                </div>
+                                            )}
+
+                                            {/* Memory namespace */}
+                                            {agent.agentConfig?.memoryPrefix && (
+                                                <div className="mt-2 font-mono text-xs text-zinc-600">
+                                                    namespace: {agent.agentConfig.memoryPrefix}
+                                                </div>
+                                            )}
+
+                                            {/* Meta */}
+                                            <div className="flex items-center gap-3 mt-2">
+                                                <span className="text-xs text-zinc-600">
+                                                    Spawned {timeAgo(agent.spawnedAt)}
+                                                </span>
+                                                {agent.completedAt && (
+                                                    <span className="text-xs text-zinc-600">
+                                                        · Completed {timeAgo(agent.completedAt)}
+                                                    </span>
+                                                )}
+                                                <span className="font-mono text-xs text-zinc-700 truncate max-w-[200px]">
+                                                    {agent.agentId}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* Actions */}
+                                        <div className="flex-shrink-0 flex flex-col gap-2">
+                                            {canInvoke && (
+                                                <button
+                                                    onClick={() => setShowInvokeFor(showInvoke ? null : agent.agentId)}
+                                                    className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium transition-colors"
+                                                >
+                                                    ↩ Invoke
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Invoke form */}
+                                    {showInvoke && (
+                                        <div className="mt-4 border-t border-zinc-800 pt-4">
+                                            <p className="text-xs text-zinc-500 mb-2">
+                                                Assign a new task to <strong className="text-zinc-300">{agent.agentName}</strong>.
+                                                It will resume with the same memory and tool access.
+                                            </p>
+                                            <div className="flex gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={invokeText[agent.agentId] ?? ""}
+                                                    onChange={e => setInvokeText(prev => ({ ...prev, [agent.agentId]: e.target.value }))}
+                                                    placeholder="New task instructions..."
+                                                    className="flex-1 rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                                    onKeyDown={e => { if (e.key === "Enter") handleInvoke(agent.agentId); }}
+                                                />
+                                                <button
+                                                    onClick={() => handleInvoke(agent.agentId)}
+                                                    disabled={isInvoking || !invokeText[agent.agentId]?.trim()}
+                                                    className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-sm font-medium transition-colors flex items-center gap-2"
+                                                >
+                                                    {isInvoking ? (
+                                                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                                    ) : "Send"}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+
+                {!loading && filtered.length > 0 && (
+                    <p className="text-center text-zinc-600 text-xs mt-6">
+                        Showing {filtered.length} agents{filter !== "all" ? ` with status "${filter}"` : ""}
+                    </p>
+                )}
+            </div>
         </div>
     );
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatRelativeTime(date: string | number | Date): string {
-    const d = new Date(date);
-    const diff = Date.now() - d.getTime();
-    const seconds = Math.floor(diff / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
-
-    if (days > 0) return `${days}d ago`;
-    if (hours > 0) return `${hours}h ago`;
-    if (minutes > 0) return `${minutes}m ago`;
-    return `${seconds}s ago`;
 }

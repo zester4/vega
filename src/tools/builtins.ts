@@ -87,12 +87,13 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "web_search",
     description:
-      "Search Google via Serper.dev for real-time web results. Returns titles, snippets, and URLs. ALWAYS use this for current events, news, facts, people, prices, weather, anything time-sensitive or that may have changed.",
+      "Search the web using Google (via Serper.dev) or DuckDuckGo fallback. Returns rich results including snippets, direct answers, Knowledge Graph, People Also Ask, related searches, and (optionally) full page content. Use type='news' for recent events. Set depth='deep' to also fetch full content of the top 2 results for comprehensive research.",
     parameters: {
       properties: {
-        query: { type: "string", description: "Search query" },
-        type: { type: "string", description: "Search type: 'search' (default) or 'news' for recent articles", enum: ["search", "news"] },
-        maxResults: { type: "number", description: "Max results (default 6, max 10)" },
+        query: { type: "string", description: "The search query" },
+        type: { type: "string", enum: ["search", "news", "images"], description: "Type of search (default: search)" },
+        maxResults: { type: "number", description: "Max results to return (1-10, default: 8)" },
+        depth: { type: "string", enum: ["quick", "deep"], description: "'quick' returns snippets only (fast). 'deep' also fetches full content of top 2 pages (slower, more thorough)." },
       },
       required: ["query"],
     },
@@ -334,15 +335,16 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "spawn_agent",
     description:
-      "Create an AUTONOMOUS SUB-AGENT that runs a specialized task in parallel in the background. The sub-agent has access to all tools and full memory. Use for: parallel research, specialized analysis, monitoring, any task that can run independently. Returns an agentId immediately — use get_agent_result() to retrieve output when done.",
+      "Spawn an autonomous sub-agent that runs a task in the background with full tool access. The agent's config is saved so you can reuse it with invoke_agent later. Use scheduledFor to delay execution (e.g., \"tomorrow 9am\", \"2h\", \"next monday\").",
     parameters: {
       properties: {
-        agentName: { type: "string", description: "Role name for this agent e.g. 'researcher', 'analyst', 'coder', 'monitor'" },
-        instructions: { type: "string", description: "Complete detailed instructions for what this agent should do and what it should produce" },
-        allowedTools: { type: "string", description: "Comma-separated list of tools to allow (empty = ALL tools)" },
-        memoryPrefix: { type: "string", description: "Namespace for this agent's memories e.g. 'research-q1-2025'. Defaults to agentId." },
-        notifyEmail: { type: "string", description: "Optional email address to notify when this agent completes" },
-        priority: { type: "string", description: "Execution priority: 'normal' (default) or 'high'", enum: ["normal", "high"] },
+        agentName: { type: "string", description: "Descriptive name for this agent, e.g. 'market_researcher' or 'email_writer'" },
+        instructions: { type: "string", description: "Detailed task instructions — be specific about what to do and what output to produce" },
+        allowedTools: { type: "string", description: "Comma-separated list of tools this agent can use. Leave blank to allow all tools." },
+        memoryPrefix: { type: "string", description: "Memory namespace key prefix — shared across invocations of the same agent" },
+        notifyEmail: { type: "string", description: "Optional email to notify when the agent completes" },
+        priority: { type: "string", enum: ["normal", "high"], description: "Execution priority (default: normal)" },
+        scheduledFor: { type: "string", description: "When to run this agent. Examples: \"now\", \"2h\", \"tomorrow\", \"next monday\", \"2026-03-05T09:00:00Z\". Omit for immediate." },
       },
       required: ["agentName", "instructions"],
     },
@@ -387,7 +389,7 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "create_tool",
     description:
-      "BUILD a new tool by writing real JavaScript code and registering it in your tool registry. The tool will be immediately available for use. Use when you identify a repeating capability gap. Generates, tests, and stores working JS code — not just a description.",
+      "Write and deploy a NEW JavaScript tool that you and other agents can use immediately. Use this to expand your capabilities (e.g. adding new API integrations, data parsers, utilities). Tool name must be snake_case. You will write the tool description and specify EXACTLY what API calls and logic it should contain.",
     parameters: {
       properties: {
         name: { type: "string", description: "Tool name in snake_case e.g. 'get_stock_price', 'parse_rss_feed'" },
@@ -396,6 +398,28 @@ export const BUILTIN_DECLARATIONS = [
         parameters: { type: "string", description: "JSON string of the parameters schema e.g. '{\"properties\":{\"symbol\":{\"type\":\"string\"}},\"required\":[\"symbol\"]}'" },
       },
       required: ["name", "description", "requirements"],
+    },
+  },
+  {
+    name: "improve_tool",
+    description:
+      "Update or rewrite an existing custom tool to fix bugs, add new features, or handle edge cases better. You describe what needs to change, and the system will rewrite the tool's implementation.",
+    parameters: {
+      properties: {
+        name: { type: "string", description: "Name of the existing tool to improve (e.g. 'fetch_stock_price')" },
+        feedback: { type: "string", description: "Specific technical instructions on what to change, fix, or add" },
+      },
+      required: ["name", "feedback"],
+    },
+  },
+  {
+    name: "delete_tool",
+    description: "Delete an existing custom tool. Use this to clean up deprecated, broken, or obsolete tools.",
+    parameters: {
+      properties: {
+        name: { type: "string", description: "Name of the tool to delete" },
+      },
+      required: ["name"],
     },
   },
 
@@ -759,6 +783,22 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+
+  // ── INVOKE AGENT (Reuse a previously-spawned agent) ───────────────────────────
+
+  {
+    name: "invoke_agent",
+    description:
+      "Reuse a previously-spawned sub-agent by assigning it a NEW task, preserving its original memory namespace, tool restrictions, and identity. The reinvoked agent can read all memory stored from its first run. Use this when you want a specialist agent to do follow-up work on top of what it already knows. Returns a new task ID to poll with get_agent_result.",
+    parameters: {
+      properties: {
+        agentId: { type: "string", description: "The original agentId returned by spawn_agent" },
+        instructions: { type: "string", description: "New task instructions for this invocation" },
+      },
+      required: ["agentId", "instructions"],
+    },
+  },
+
 ] as const;
 
 // ─── Type Helpers ─────────────────────────────────────────────────────────────
@@ -814,10 +854,17 @@ export async function executeTool(
       case "trigger_workflow": return await execTriggerWorkflow(args, env);
       case "get_task_status": return await execGetTaskStatus(args, env);
       case "spawn_agent": return await execSpawnAgent(args, env);
+      case "invoke_agent": return await execInvokeAgent(args, env);
       case "get_agent_result": return await execGetAgentResult(args, env);
       case "list_agents": return await execListAgents(args, env);
       case "cancel_agent": return await execCancelAgent(args, env);
-      case "create_tool": return await execCreateTool(args, env);
+      // Tool Creation & Lifecycle
+      case "create_tool":
+        return await execCreateTool(args, env);
+      case "improve_tool":
+        return await execImproveTool(args, env);
+      case "delete_tool":
+        return await execDeleteTool(args, env);
       case "benchmark_tool": return await execBenchmarkTool(args, env);
 
       // Scheduling
@@ -939,34 +986,42 @@ Return ONLY valid JSON, no other text.`,
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { query, type = "search", maxResults = 6 } = args as {
-    query: string; type?: string; maxResults?: number;
+  const { query, type = "search", maxResults = 8, depth = "quick" } = args as {
+    query: string; type?: string; maxResults?: number; depth?: string;
   };
 
-  if (!env.SERPER_API_KEY) {
+  let serperData: Record<string, unknown> | null = null;
+
+  if (env.SERPER_API_KEY) {
+    const endpoint = type === "news"
+      ? "https://google.serper.dev/news"
+      : type === "images"
+        ? "https://google.serper.dev/images"
+        : "https://google.serper.dev/search";
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "X-API-KEY": env.SERPER_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: query, num: Math.min(Number(maxResults), 10) }),
+      });
+
+      if (res.ok) {
+        serperData = await res.json() as Record<string, unknown>;
+      } else {
+        console.warn(`[web_search] Serper returned ${res.status}, falling back`);
+      }
+    } catch (e) {
+      console.warn(`[web_search] Serper fetch failed: ${String(e)}`);
+    }
+  }
+
+  if (!serperData) {
     return await duckDuckGoFallback(query, Number(maxResults));
   }
 
-  const endpoint = type === "news"
-    ? "https://google.serper.dev/news"
-    : "https://google.serper.dev/search";
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "X-API-KEY": env.SERPER_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ q: query, num: Math.min(Number(maxResults), 10) }),
-  });
-
-  if (!res.ok) {
-    console.warn(`[web_search] Serper returned ${res.status}, falling back to DuckDuckGo`);
-    return await duckDuckGoFallback(query, Number(maxResults));
-  }
-
-  const data = await res.json() as Record<string, unknown>;
-  const organic = (data.organic as unknown[] ?? []).slice(0, Number(maxResults));
+  // ── Parse organic results
+  const organic = (serperData.organic as unknown[] ?? []).slice(0, Number(maxResults));
   const results = organic.map((r) => {
     const item = r as Record<string, unknown>;
     return {
@@ -974,13 +1029,26 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
       snippet: String(item.snippet ?? ""),
       url: String(item.link ?? ""),
       date: item.date ? String(item.date) : undefined,
+      position: item.position,
+      sitelinks: item.sitelinks,
     };
   });
 
-  const kg = data.knowledgeGraph as Record<string, unknown> | undefined;
-  const answerBox = data.answerBox as Record<string, unknown> | undefined;
+  // ── Rich extras
+  const kg = serperData.knowledgeGraph as Record<string, unknown> | undefined;
+  const answerBox = serperData.answerBox as Record<string, unknown> | undefined;
+  const paa = (serperData.peopleAlsoAsk as unknown[] ?? []).slice(0, 4);
+  const related = (serperData.relatedSearches as unknown[] ?? []).slice(0, 5).map(
+    (r) => typeof r === "object" ? (r as Record<string, unknown>).query : r
+  );
+  const images = type === "images"
+    ? (serperData.images as unknown[] ?? []).slice(0, 5).map((img) => {
+      const i = img as Record<string, unknown>;
+      return { title: i.title, imageUrl: i.imageUrl, link: i.link };
+    })
+    : undefined;
 
-  return {
+  const output: Record<string, unknown> = {
     query,
     type,
     results,
@@ -989,15 +1057,46 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
       directAnswer: {
         title: String(answerBox.title ?? ""),
         answer: String(answerBox.answer ?? answerBox.snippet ?? ""),
+        source: answerBox.link,
       },
     }),
     ...(kg && {
       knowledgeGraph: {
         title: String(kg.title ?? ""),
+        type: kg.type,
         description: String(kg.description ?? ""),
+        imageUrl: kg.imageUrl,
+        attributes: kg.attributes,
       },
     }),
+    ...(paa.length > 0 && { peopleAlsoAsk: paa }),
+    ...(related.length > 0 && { relatedSearches: related }),
+    ...(images && { images }),
   };
+
+  // ── Deep mode: fetch full content of top 2 pages
+  if (depth === "deep" && results.length > 0) {
+    const topUrls = results.slice(0, 2).map((r) => r.url).filter(Boolean);
+    const pageContents: { url: string; content: string }[] = [];
+
+    for (const url of topUrls) {
+      try {
+        const res = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; VEGA-Agent/2.0)" },
+          signal: AbortSignal.timeout(5000),
+        });
+        const raw = await res.text();
+        pageContents.push({ url, content: stripHtml(raw).slice(0, 4000) });
+      } catch (e) {
+        pageContents.push({ url, content: `[Failed to fetch: ${String(e)}]` });
+      }
+    }
+
+    output.pageContents = pageContents;
+    output.note = "Deep mode: full content fetched from top 2 results.";
+  }
+
+  return output;
 }
 
 async function duckDuckGoFallback(query: string, limit: number): Promise<Record<string, unknown>> {
@@ -1507,20 +1606,35 @@ async function execGetTaskStatus(args: ToolArgs, env: Env): Promise<Record<strin
 }
 
 async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { agentName, instructions, allowedTools, memoryPrefix, notifyEmail, priority = "normal" } = args as {
+  const {
+    agentName,
+    instructions,
+    allowedTools,
+    memoryPrefix,
+    notifyEmail,
+    priority = "normal",
+    scheduledFor,
+  } = args as {
     agentName: string;
     instructions: string;
     allowedTools?: string;
     memoryPrefix?: string;
     notifyEmail?: string;
     priority?: string;
+    scheduledFor?: string; // e.g. "2h", "tomorrow 9am", "next monday", ISO 8601
   };
 
   const agentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const qstash = new QStashClient({
-    token: env.QSTASH_TOKEN,
-    baseUrl: env.QSTASH_URL,
-  });
+  const effectiveMemoryPrefix = memoryPrefix ?? agentId;
+
+  const agentConfig = {
+    name: agentName,
+    allowedTools: allowedTools ? allowedTools.split(",").map((t: string) => t.trim()) : null,
+    memoryPrefix: effectiveMemoryPrefix,
+    notifyEmail: notifyEmail ?? null,
+    spawnedAt: new Date().toISOString(),
+    parentAgent: "vega-core",
+  };
 
   const payload = {
     taskId: agentId,
@@ -1528,50 +1642,247 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
     taskType: "sub_agent",
     instructions,
     steps: [],
-    agentConfig: {
-      name: agentName,
-      allowedTools: allowedTools ? allowedTools.split(",").map((t: string) => t.trim()) : null,
-      memoryPrefix: memoryPrefix ?? agentId,
-      notifyEmail: notifyEmail ?? null,
-      spawnedAt: new Date().toISOString(),
-      parentAgent: "vega-core",
-    },
+    agentConfig,
   };
 
-  const workflowBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-  const publishOptions: Record<string, unknown> = {
-    url: `${workflowBase}/workflow`,
-    body: payload,
-  };
-
-  // High priority agents get faster scheduling via QStash delay=0
-  if (priority === "high") {
-    publishOptions.delay = 0;
-  }
-
-  await qstash.publishJSON(publishOptions as Parameters<typeof qstash.publishJSON>[0]);
-
-  // Track all spawned agents in Redis for list_agents
+  // Track spawned agent in Redis
   const redis = await getRedisClient(env);
-  console.log(`[execSpawnAgent] Redis URL: ${env.UPSTASH_REDIS_REST_URL?.slice(0, 25)}...`);
-  console.log(`[execSpawnAgent] Saving agent ${agentId} to agent:spawned`);
-
-  await redis.lpush("agent:spawned", JSON.stringify({
+  const agentRecord = {
     agentId,
     agentName,
     spawnedAt: new Date().toISOString(),
     status: "initializing",
-  }));
-  await redis.ltrim("agent:spawned", 0, 199); // keep last 200
+    scheduledFor: scheduledFor ?? null,
+    agentConfig,
+  };
+
+  await redis.lpush("agent:spawned", JSON.stringify(agentRecord));
+  await redis.ltrim("agent:spawned", 0, 199);
+  // Fast O(1) lookup key for invoke_agent
+  await redis.set(`agent:config:${agentId}`, JSON.stringify(agentRecord), { ex: 60 * 60 * 24 * 30 });
+
+  // ── Scheduled future spawn: use QStash notBefore ──────────────────────────
+  if (scheduledFor && scheduledFor !== "now" && scheduledFor.toLowerCase() !== "immediately") {
+    const delaySeconds = parseScheduledFor(scheduledFor);
+    if (delaySeconds > 0) {
+      try {
+        const qstash = new QStashClient({ token: env.QSTASH_TOKEN, baseUrl: env.QSTASH_URL });
+        const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+        const notBefore = Math.floor(Date.now() / 1000) + delaySeconds;
+
+        // Update agent record as scheduled
+        const scheduledRecord = { ...agentRecord, status: "scheduled", scheduledAt: new Date(notBefore * 1000).toISOString() };
+        await redis.set(`agent:config:${agentId}`, JSON.stringify(scheduledRecord), { ex: 60 * 60 * 24 * 30 });
+        // Update the list too
+        try {
+          const raw = await redis.lrange("agent:spawned", 0, 0) as string[];
+          if (raw[0]) {
+            const latest = JSON.parse(raw[0]);
+            if (latest.agentId === agentId) {
+              await redis.lset("agent:spawned", 0, JSON.stringify(scheduledRecord));
+            }
+          }
+        } catch { /* ignore */ }
+
+        await qstash.publishJSON({
+          url: `${workerBase}/run-subagent`,
+          notBefore,
+          body: payload,
+          headers: { "X-Internal-Secret": env.TELEGRAM_INTERNAL_SECRET ?? "" },
+        } as Parameters<typeof qstash.publishJSON>[0]);
+
+        const humanTime = new Date(notBefore * 1000).toLocaleString();
+        return {
+          success: true,
+          agentId,
+          agentName,
+          status: "scheduled",
+          scheduledFor: humanTime,
+          delaySeconds,
+          message: `Agent '${agentName}' scheduled to run at ${humanTime}. ID: ${agentId}`,
+          instructions: `Check status: get_agent_result('${agentId}')`,
+        };
+      } catch (e) {
+        console.warn(`[execSpawnAgent] Scheduled spawn failed, falling through to immediate: ${String(e)}`);
+      }
+    }
+  }
+
+  // ── Immediate spawn: call our own /run-subagent endpoint directly ───────────
+  // This bypasses QStash/Upstash Workflow and uses Cloudflare waitUntil instead.
+  // Much more reliable — no callback URL issues in local dev or production.
+  try {
+    const workerBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+    if (workerBase) {
+      const spawnRes = await fetch(`${workerBase}/run-subagent`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Secret": env.TELEGRAM_INTERNAL_SECRET ?? "",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (spawnRes.ok || spawnRes.status === 202) {
+        console.log(`[execSpawnAgent] ${agentId} dispatched to /run-subagent (${spawnRes.status})`);
+      } else {
+        const errText = await spawnRes.text();
+        console.warn(`[execSpawnAgent] /run-subagent returned ${spawnRes.status}: ${errText}`);
+
+        // Mark as error in Redis
+        await redis.set(`agent:config:${agentId}`, JSON.stringify({ ...agentRecord, status: "error", error: `Dispatch failed: ${spawnRes.status}` }), { ex: 60 * 60 * 24 * 30 });
+      }
+    } else {
+      console.warn(`[execSpawnAgent] UPSTASH_WORKFLOW_URL not set — cannot dispatch sub-agent ${agentId}`);
+    }
+  } catch (e) {
+    console.error(`[execSpawnAgent] Self-call failed for ${agentId}:`, String(e));
+  }
 
   return {
     success: true,
     agentId,
     agentName,
     priority,
-    message: `Sub-agent '${agentName}' spawned. It has access to all tools and will run autonomously.`,
-    instructions: `Use get_agent_result('${agentId}') to check progress and retrieve results.`,
-    memoryPrefix: memoryPrefix ?? agentId,
+    status: "running",
+    message: `Sub-agent '${agentName}' is now running in the background. Its config is saved for later reuse.`,
+    instructions: `Poll: get_agent_result('${agentId}'). Reuse: invoke_agent('${agentId}', 'new task').`,
+    memoryPrefix: effectiveMemoryPrefix,
+  };
+}
+
+/**
+ * Parse a human-like time string into delay seconds.
+ * Supports: "2h", "30m", "1d", "tomorrow", "next week", ISO 8601.
+ */
+function parseScheduledFor(input: string): number {
+  const s = input.trim().toLowerCase();
+
+  // Relative: "2h", "30m", "1d", "45s", "1w"
+  const relMatch = s.match(/^(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|day|w|week)s?$/);
+  if (relMatch) {
+    const n = parseFloat(relMatch[1]);
+    const unit = relMatch[2];
+    const multipliers: Record<string, number> = {
+      s: 1, sec: 1,
+      m: 60, min: 60,
+      h: 3600, hr: 3600,
+      d: 86400, day: 86400,
+      w: 604800, week: 604800,
+    };
+    return Math.round(n * (multipliers[unit] ?? 3600));
+  }
+
+  // Natural: "tomorrow", "next week", "next monday"
+  if (s.includes("tomorrow")) return 86400;
+  if (s.includes("next week")) return 604800;
+  if (s.includes("next hour")) return 3600;
+  if (s.includes("tonight")) {
+    const now = new Date();
+    const tonight = new Date(now); tonight.setHours(20, 0, 0, 0);
+    return Math.max(0, Math.floor((tonight.getTime() - now.getTime()) / 1000));
+  }
+  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  for (let i = 0; i < days.length; i++) {
+    if (s.includes(days[i])) {
+      const now = new Date();
+      const diff = (i - now.getDay() + 7) % 7 || 7; // next occurrence
+      return diff * 86400;
+    }
+  }
+
+  // ISO 8601 / absolute date
+  try {
+    const target = new Date(input);
+    if (!isNaN(target.getTime())) {
+      return Math.max(0, Math.floor((target.getTime() - Date.now()) / 1000));
+    }
+  } catch { /* not a date */ }
+
+  return 0; // unrecognized = immediate
+}
+
+// ─── Invoke (reuse) a previously-spawned agent with a NEW task ────────────────
+
+export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { agentId, instructions } = args as { agentId: string; instructions: string };
+
+  if (!agentId || !instructions) {
+    return { success: false, error: "agentId and instructions are required" };
+  }
+
+  // Load the saved agent config
+  const redis = await getRedisClient(env);
+  const savedRaw = await redis.get<string>(`agent:config:${agentId}`);
+  if (!savedRaw) {
+    return {
+      success: false,
+      error: `No saved config found for agent '${agentId}'. It may have expired or never existed. Use spawn_agent to create a new one.`,
+    };
+  }
+
+  let savedRecord: {
+    agentName: string;
+    agentConfig: {
+      name: string;
+      allowedTools: string[] | null;
+      memoryPrefix: string;
+      notifyEmail: string | null;
+      spawnedAt: string;
+      parentAgent: string;
+    };
+  };
+  try {
+    savedRecord = JSON.parse(String(savedRaw));
+  } catch {
+    return { success: false, error: "Failed to parse saved agent config." };
+  }
+
+  const originalConfig = savedRecord.agentConfig;
+
+  // Spawn a new workflow execution reusing the same identity and memory namespace
+  const newTaskId = `${agentId}-invoke-${Date.now()}`;
+  const qstash = new QStashClient({
+    token: env.QSTASH_TOKEN,
+    baseUrl: env.QSTASH_URL,
+  });
+
+  const workflowBase = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
+  await qstash.publishJSON({
+    url: `${workflowBase}/workflow`,
+    body: {
+      taskId: newTaskId,
+      sessionId: `agent-${agentId}`,  // Same session = same memory
+      taskType: "sub_agent",
+      instructions,
+      steps: [],
+      agentConfig: {
+        ...originalConfig,
+        // Update spawnedAt for this invocation but keep the rest identical
+        spawnedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  // Track this invocation in Redis too
+  await redis.lpush("agent:spawned", JSON.stringify({
+    agentId: newTaskId,
+    agentName: `${originalConfig.name} (reinvoked)`,
+    spawnedAt: new Date().toISOString(),
+    status: "initializing",
+    originalAgentId: agentId,
+    agentConfig: originalConfig,
+  }));
+  await redis.ltrim("agent:spawned", 0, 199);
+
+  return {
+    success: true,
+    newTaskId,
+    originalAgentId: agentId,
+    agentName: originalConfig.name,
+    memoryPrefix: originalConfig.memoryPrefix,
+    message: `Agent '${originalConfig.name}' reinvoked with the same memory namespace (${originalConfig.memoryPrefix}). New task ID: ${newTaskId}.`,
+    instructions: `Poll: get_agent_result('${newTaskId}')`,
   };
 }
 
@@ -1656,11 +1967,12 @@ async function execCancelAgent(args: ToolArgs, env: Env): Promise<Record<string,
 }
 
 async function execCreateTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { name, description, requirements = "", parameters: parametersStr } = args as {
+  const { name, description, requirements = "", parameters: parametersStr, testInputs: testInputsStr } = args as {
     name: string;
     description: string;
     requirements?: string;
     parameters?: string;
+    testInputs?: string;
   };
 
   // Validate name
@@ -1670,61 +1982,103 @@ async function execCreateTool(args: ToolArgs, env: Env): Promise<Record<string, 
 
   const { think } = await import("../gemini");
 
-  // Step 1: Generate real JavaScript function body
-  const implementation = await think(
+  // ── Step 1: Architecture Design ──────────────────────────────────────────────
+  // Ask the AI to design the tool BEFORE writing code. This forces reasoning
+  // about API structure, auth, error edge cases, and return shape first.
+  const designDoc = await think(
     env.GEMINI_API_KEY,
-    `You are writing a JavaScript async function body for a tool called "${name}".
+    `You are a senior software architect designing a JavaScript tool function called "${name}".
 
-Tool description: ${description}
-Detailed requirements: ${requirements}
+Description: ${description}
+Requirements: ${requirements || "(none specified)"}
 
-The function will be invoked exactly like this:
-  const result = await fn(args, env, fetchFn);
+Produce a concise DESIGN DOCUMENT covering:
+1. What external API(s) or services this tool calls (exact endpoints)
+2. What authentication is required (env variable names)
+3. Input parameters and their types
+4. Expected return shape (JSON object with key names and types)
+5. The 3 most likely error cases and how to handle them gracefully
+6. One concrete example input and the expected output
 
-Where:
-  - args: plain JS object with the tool's parameters
-  - env: Cloudflare Worker env (has env.GEMINI_API_KEY, env.SERPER_API_KEY, etc.)
-  - fetchFn: async (url, options?) => Response — use this instead of fetch()
-
-Strict rules:
-  1. Write ONLY the function BODY — no "async function name() {" wrapper
-  2. ALWAYS return a plain object (never throw — catch all errors)
-  3. Use fetchFn() for all HTTP requests
-  4. No imports allowed (use dynamic import ONLY if absolutely necessary)
-  5. Handle missing API keys gracefully
-  6. Return descriptive error objects when things fail: { error: "..." }
-
-Example for a "get_weather" tool:
-  const res = await fetchFn(\`https://wttr.in/\${args.city}?format=j1\`);
-  if (!res.ok) return { error: \`Weather API returned \${res.status}\` };
-  const data = await res.json();
-  return { city: args.city, temp: data.current_condition[0].temp_C, desc: data.current_condition[0].weatherDesc[0].value };
-
-Now write the function body for "${name}" (${requirements}):`,
-    "You are a senior JavaScript developer. Write precise, safe, error-handled code. Return ONLY the function body, nothing else."
+Be specific. This design doc will be used to write the implementation.`,
+    "You are a precise software architect. Focus on APIs, auth, error cases, and return shapes."
   );
 
-  // Step 2: Basic validation
+  // ── Step 2: Implementation ────────────────────────────────────────────────────
+  const implementation = await think(
+    env.GEMINI_API_KEY,
+    `You are implementing a JavaScript async function body based on this design:
+
+${designDoc}
+
+Tool name: "${name}"
+Description: ${description}
+
+The function signature is:
+  async function handler(args, env, fetchFn) { ... }
+
+Where:
+  - args: plain JS object with the tool's input parameters
+  - env: Cloudflare Worker environment bindings (env.GEMINI_API_KEY, env.SERPER_API_KEY, env.UPSTASH_REDIS_REST_URL, etc.)
+  - fetchFn: async (url, options?) => Response — ALWAYS use this for HTTP requests
+
+IMPORTANT RULES:
+  1. Return ONLY the function BODY — no function declaration wrapper
+  2. ALWAYS return a plain JS object (never throw — catch ALL errors)
+  3. Use fetchFn() for EVERY HTTP request (not global fetch)
+  4. Only dynamic import() is allowed (no top-level imports)
+  5. Guard every env var: if (!env.API_KEY) return { error: "API_KEY not configured" }
+  6. Return { error: "..." } for failures — never undefined or null
+  7. On success, return a descriptive JSON object matching the design
+  8. Comments are fine but keep them minimal
+  9. Handle API rate limits and non-200 status codes explicitly
+ 10. Keep the code under 100 lines if possible
+
+Write the complete function body now:`,
+    "You are a production JavaScript developer. Write safe, robust, well-structured code. Implement EXACTLY what the design specifies."
+  );
+
+  // ── Step 3: Validation ───────────────────────────────────────────────────────
   const code = implementation.trim();
-  if (!code.includes("return ")) {
-    return {
-      success: false,
-      error: "Generated code is missing a return statement. Try again with more specific requirements.",
-      generated: code.slice(0, 200),
-    };
+  const issues: string[] = [];
+
+  if (!code.includes("return ")) issues.push("Missing return statement");
+  if (code.includes("fetch(") && !code.includes("fetchFn(")) {
+    issues.push("Uses raw fetch() instead of fetchFn() — potential runtime error");
+  }
+  if (!code.includes("catch") && !code.includes("try")) {
+    issues.push("No error handling found — tool may crash on API failures");
   }
 
-  // Step 3: Parse parameters schema
+  // Auto-fix: replace raw fetch calls with fetchFn if needed
+  const fixedCode = code.replace(/(?<![a-zA-Z])fetch\s*\(/g, "fetchFn(");
+
+  // ── Step 4: Parse parameters schema ─────────────────────────────────────────
   let parsedParams: Record<string, unknown> = {};
   if (parametersStr) {
     try {
       parsedParams = JSON.parse(String(parametersStr));
-    } catch {
-      // Non-fatal: continue with empty params
-    }
+    } catch { /* Non-fatal: use empty params */ }
+  } else {
+    // Auto-derive from design doc
+    try {
+      const autoParams = await think(
+        env.GEMINI_API_KEY,
+        `Extract the JSON Schema parameters object for the tool described in this design doc:
+
+${designDoc}
+
+Return ONLY a JSON object like:
+{ "properties": { "param1": { "type": "string", "description": "..." } }, "required": ["param1"] }
+Return nothing else.`,
+        "Return only valid JSON. No explanation."
+      );
+      const jsonMatch = autoParams.match(/\{[\s\S]*\}/);
+      if (jsonMatch) parsedParams = JSON.parse(jsonMatch[0]);
+    } catch { /* Use empty */ }
   }
 
-  // Step 4: Store the tool with real code
+  // ── Step 5: Register the tool ────────────────────────────────────────────────
   try {
     const { Redis } = await import("@upstash/redis/cloudflare");
     const { registerTool } = await import("../memory");
@@ -1734,21 +2088,68 @@ Now write the function body for "${name}" (${requirements}):`,
       name: String(name),
       description: String(description),
       parameters: parsedParams,
-      handlerCode: code,
+      handlerCode: fixedCode,
       builtIn: false,
     };
 
     await registerTool(redis, tool);
 
+    // Store design doc for reference
+    await redis.set(`tool:design:${name}`, designDoc.slice(0, 4000), { ex: 60 * 60 * 24 * 90 });
+
     return {
       success: true,
       name,
-      message: `✅ Tool '${name}' created with working JavaScript implementation. You can now call it immediately.`,
-      preview: code.slice(0, 400) + (code.length > 400 ? "\n..." : ""),
-      codeSize: code.length,
+      message: `✅ Tool '${name}' created with a 3-step design-implement-validate pipeline.`,
+      designDocument: designDoc.slice(0, 600) + (designDoc.length > 600 ? "\n..." : ""),
+      codePreview: fixedCode.slice(0, 500) + (fixedCode.length > 500 ? "\n..." : ""),
+      codeSize: fixedCode.length,
+      issues: issues.length > 0 ? issues : undefined,
+      parametersInferred: !parametersStr,
     };
   } catch (e) {
     return { success: false, error: `Failed to register tool: ${String(e)}` };
+  }
+}
+
+async function execImproveTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { name, feedback } = args as { name: string; feedback: string };
+
+  const { Redis } = await import("@upstash/redis/cloudflare");
+  const redis = Redis.fromEnv(env);
+
+  const existingRaw = await redis.get(`tool:${name}`);
+  if (!existingRaw) {
+    return { success: false, error: `Tool '${name}' not found. Cannot improve.` };
+  }
+
+  let existingCode = "(code unavailable)";
+  try {
+    const existing = JSON.parse(String(existingRaw));
+    existingCode = existing.handlerCode || "(code unavailable)";
+  } catch { /* ignore */ }
+
+  const requirements = `Update the tool based on this feedback/bug report:\n\n${feedback}\n\nExisting code for reference:\n\`\`\`javascript\n${existingCode}\n\`\`\``;
+
+  return execCreateTool({
+    name,
+    description: `(updated) tool ${name}`,
+    requirements
+  }, env);
+}
+
+async function execDeleteTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { name } = args as { name: string };
+  const { Redis } = await import("@upstash/redis/cloudflare");
+  const redis = Redis.fromEnv(env);
+
+  const deleted = await redis.del(`tool:${name}`);
+  await redis.del(`tool:design:${name}`);
+
+  if (deleted > 0) {
+    return { success: true, message: `Tool '${name}' has been deleted successfully.`, name };
+  } else {
+    return { success: false, error: `Tool '${name}' not found or already deleted.`, name };
   }
 }
 

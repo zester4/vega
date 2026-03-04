@@ -33,6 +33,8 @@ import { BUILTIN_DECLARATIONS } from "./tools/builtins";
 import { getRedis, getTask, updateTask, listTasks, listSchedules, listTools } from "./memory";
 import { workflowHandler } from "./routes/workflow";
 import type { WorkflowPayload } from "./routes/workflow";
+import { runSubAgentTask } from "./routes/subagent";
+import type { SubAgentPayload } from "./routes/subagent";
 import { think } from "./gemini";
 import { executeTool } from "./tools/builtins";
 import {
@@ -375,6 +377,60 @@ app.get("/agents", async (c) => {
     return c.json({ agents: filtered, count: filtered.length });
   } catch (err) {
     console.error("[/agents error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Get specific agent detail ────────────────────────────────────────────────
+app.get("/agents/:id", async (c) => {
+  try {
+    const id = c.req.param("id");
+    const redis = getRedis(c.env);
+
+    let agentRecord = null;
+    const raw = await redis.lrange("agent:spawned", 0, 199) as string[];
+    for (const r of raw) {
+      try {
+        const parsed = JSON.parse(r);
+        if (parsed.agentId === id) {
+          agentRecord = parsed;
+          break;
+        }
+      } catch { /* skip */ }
+    }
+
+    if (!agentRecord) {
+      return c.json({ error: "Agent not found" }, 404);
+    }
+
+    const task = await getTask(redis, id);
+    if (task) {
+      agentRecord.taskStatus = task.status;
+      agentRecord.taskSummary = (task.result as { summary?: string })?.summary;
+    }
+
+    return c.json(agentRecord);
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Invoke existing agent directly from API ──────────────────────────────────
+app.post("/agents/:id/invoke", async (c) => {
+  try {
+    const agentId = c.req.param("id");
+    const body = await c.req.json<{ instructions: string }>();
+
+    if (!body.instructions) {
+      return c.json({ error: "instructions required" }, 400);
+    }
+
+    const { execInvokeAgent } = await import("./tools/builtins");
+    const result = await execInvokeAgent({ agentId, instructions: body.instructions }, c.env);
+
+    return c.json(result);
+  } catch (err) {
+    console.error("[/agents/:id/invoke error]", err);
     return c.json({ error: String(err) }, 500);
   }
 });
@@ -783,6 +839,37 @@ app.post("/workflow", async (c) => {
     },
   });
   return handler.fetch(c.req.raw, c.env as unknown as Record<string, string | undefined>);
+});
+
+// ─── Direct Sub-Agent Executor ─────────────────────────────────────────────
+// Does NOT use QStash/Upstash Workflow — runs agent in background via waitUntil.
+// Protected by TELEGRAM_INTERNAL_SECRET to prevent abuse.
+app.post("/run-subagent", async (c) => {
+  const secret = c.req.header("X-Internal-Secret");
+  if (!c.env.TELEGRAM_INTERNAL_SECRET || secret !== c.env.TELEGRAM_INTERNAL_SECRET) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let payload: SubAgentPayload;
+  try {
+    payload = await c.req.json<SubAgentPayload>();
+  } catch {
+    return c.json({ error: "Invalid JSON payload" }, 400);
+  }
+
+  if (!payload.taskId || !payload.agentConfig) {
+    return c.json({ error: "taskId and agentConfig are required" }, 400);
+  }
+
+  // Fire-and-forget in background — responds 202 immediately
+  c.executionCtx.waitUntil(runSubAgentTask(c.env, payload));
+
+  return c.json({
+    success: true,
+    taskId: payload.taskId,
+    agentName: payload.agentConfig.name,
+    message: "Sub-agent queued for background execution.",
+  }, 202);
 });
 
 // ─── QStash Cron Heartbeat ────────────────────────────────────────────────────

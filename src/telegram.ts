@@ -810,6 +810,22 @@ async function processMessage(
     const replyChunks = splitMessage(reply, 3800);
     const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
 
+    const sendSafeMessage = async (rawText: string, htmlText: string, msgId: number) => {
+        try {
+            return await bot.sendMessage(chatId, htmlText, {
+                parse_mode: "HTML",
+                reply_to_message_id: msgId,
+                disable_web_page_preview: true,
+            });
+        } catch (e) {
+            console.warn("[Telegram] HTML parsing failed, falling back to plain text:", String(e));
+            return await bot.sendMessage(chatId, rawText, {
+                reply_to_message_id: msgId,
+                disable_web_page_preview: true,
+            });
+        }
+    };
+
     for (let i = 0; i < replyChunks.length; i++) {
         const chunk = replyChunks[i];
         const formatted = markdownToHtml(chunk);
@@ -822,37 +838,21 @@ async function processMessage(
                 const audioBytes = await generateSpeechBytes(reply, env);
 
                 if (audioBytes) {
-                    await bot.sendMessage(chatId, formatted, {
-                        parse_mode: "HTML",
-                        reply_to_message_id: msg.message_id,
-                        disable_web_page_preview: true,
-                    });
+                    await sendSafeMessage(chunk, formatted, msg.message_id);
                     await bot.sendVoice(chatId, audioBytes, {
                         reply_to_message_id: msg.message_id,
                         caption: "🎙️ Voice reply",
                     });
                 } else {
-                    await bot.sendMessage(chatId, formatted, {
-                        parse_mode: "HTML",
-                        reply_to_message_id: msg.message_id,
-                        disable_web_page_preview: true,
-                    });
+                    await sendSafeMessage(chunk, formatted, msg.message_id);
                 }
             } catch (ttsErr) {
-                console.error("[Telegram TTS] Failed:", ttsErr);
-                await bot.sendMessage(chatId, formatted, {
-                    parse_mode: "HTML",
-                    reply_to_message_id: msg.message_id,
-                    disable_web_page_preview: true,
-                });
+                console.error("[Telegram TTS / Msg] Failed:", ttsErr);
+                await sendSafeMessage(chunk, formatted, msg.message_id);
             }
         } else {
             // Regular text chunk delivery
-            await bot.sendMessage(chatId, formatted, {
-                parse_mode: "HTML",
-                reply_to_message_id: msg.message_id,
-                disable_web_page_preview: true,
-            });
+            await sendSafeMessage(chunk, formatted, msg.message_id);
         }
     }
 

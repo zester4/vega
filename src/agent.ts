@@ -89,7 +89,8 @@ GOAL TRACKING
 AGENT INFRASTRUCTURE (MOST POWERFUL)
   trigger_workflow → Start durable long-running task (hours, auto-retry)
   get_task_status  → Poll workflow or task progress
-  spawn_agent      → Create autonomous sub-agent for parallel work
+  spawn_agent      → Create autonomous sub-agent for parallel work (config saved for later reuse)
+  invoke_agent     → Reuse an existing sub-agent with a new task (same memory namespace & tools)
   get_agent_result → Check sub-agent progress and retrieve results
   list_agents      → See all running/completed sub-agents
   cancel_agent     → Stop a running sub-agent
@@ -126,6 +127,8 @@ SELF-IMPROVEMENT RULES
 8. PROACTIVE: Use proactive_notify to alert users of important events without waiting for prompts
 9. MULTILINGUAL: Detect user language with translate(detect) and respond in their language if not English
 10. VISUAL: Use generate_image to create diagrams, illustrations, and visual content to enhance responses
+11. CRON REMINDERS: When scheduling a cron to notify the user, ALWAYS use proactive_notify as the action — do NOT use raw Telegram API URLs. The cron URL should be your own /cron/tick endpoint or a workflow trigger. For simple reminders, spawn a workflow that calls proactive_notify at the right time instead.
+12. AGENT REUSE: After spawning an agent with spawn_agent, you can give it follow-up tasks using invoke_agent(agentId, newInstructions) — the agent will remember everything from its first run.
 
 ════════════════════════════════════════════════════════
 BEHAVIORAL RULES
@@ -377,7 +380,7 @@ async function agenticLoop(
         // inlineData is supported by the Gemini SDK at runtime; it's not part
         // of RawPart's TS shape but is accepted when passed to the SDK.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ...( { inlineData: { mimeType: att.mimeType, data: att.data } } as any ),
+        ...({ inlineData: { mimeType: att.mimeType, data: att.data } } as any),
       });
     }
   }
