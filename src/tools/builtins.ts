@@ -55,8 +55,8 @@
  *
  *   IMAGE & VOICE
  *     generate_image    → Gemini 3.1 Flash Image Preview (Nano Banana 2)
- *     text_to_speech    → ElevenLabs TTS (32 languages, MP3 to R2)
- *     speech_to_text    → ElevenLabs Scribe v2 STT (90+ languages)
+ *     text_to_speech    → Gemini 2.5 Flash TTS (30 voices, WAV to R2)
+ *     speech_to_text    → Gemini Multimodal STT (90+ languages)
  *
  *   MARKET INTELLIGENCE
  *     market_data       → Yahoo Finance live prices, portfolio, alerts
@@ -604,40 +604,43 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
-  // ── TEXT TO SPEECH (ElevenLabs) ─────────────────────────────────────────────
+  // ── TEXT TO SPEECH (Gemini) ─────────────────────────────────────────────────
 
   {
     name: "text_to_speech",
     description:
-      "Convert text to lifelike speech using ElevenLabs. Generates MP3 stored in R2. Perfect for voice content, narrations, Telegram voice replies. Models: 'flash' (75ms, real-time), 'multilingual' (best quality, 32 languages), 'turbo' (balanced), 'v3' (most expressive). Requires ELEVENLABS_API_KEY.",
+      "Convert text to lifelike speech using Gemini 2.5 Flash TTS. Generates high-quality WAV audio stored in R2. Supports controllable style, accent, and pace through natural language prompts. Perfect for voice messages, narrations, and Telegram replies.",
     parameters: {
       properties: {
-        text: { type: "string", description: "Text to convert to speech (max 5000 chars)" },
-        voiceId: { type: "string", description: "ElevenLabs voice ID. Defaults to Rachel. Find voices at elevenlabs.io/voice-library" },
-        model: { type: "string", description: "TTS model: 'flash' (fastest 75ms), 'multilingual' (best quality), 'turbo' (balanced), 'v3' (most expressive)", enum: ["flash", "multilingual", "turbo", "v3"] },
-        languageCode: { type: "string", description: "ISO 639-1 language code for normalization (e.g. 'en', 'es', 'fr', 'zh')" },
-        stability: { type: "number", description: "Voice stability 0-1 (default 0.5). Higher = more consistent." },
-        similarityBoost: { type: "number", description: "Similarity boost 0-1 (default 0.75)." },
+        text: { type: "string", description: "Text to convert to speech. You can include performance notes like 'Say cheerfully: Hello!' or 'Speak slowly: Welcome'." },
+        voiceName: {
+          type: "string",
+          description: "Gemini voice to use. Default: Puck.",
+          enum: [
+            "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
+            "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+            "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+            "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+            "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
+          ]
+        },
       },
       required: ["text"],
     },
   },
 
-  // ── SPEECH TO TEXT (ElevenLabs Scribe v2) ───────────────────────────────────
+  // ── SPEECH TO TEXT (Gemini) ─────────────────────────────────────────────────
 
   {
     name: "speech_to_text",
     description:
-      "Transcribe audio to text using ElevenLabs Scribe v2 — state-of-the-art accuracy across 90+ languages. Supports speaker diarization, audio event tagging, and word-level timestamps. Accepts a public audio URL, R2 filename, or base64 audio. Requires ELEVENLABS_API_KEY.",
+      "Transcribe audio to text using Gemini's native multimodal understanding. Highly accurate across 90+ languages. Accepts a public audio URL, R2 filename, or base64 audio.",
     parameters: {
       properties: {
-        audioUrl: { type: "string", description: "Public URL to audio/video file (MP3, WAV, OGG, MP4, etc.)" },
-        audioBase64: { type: "string", description: "Base64 encoded audio data (for smaller files)" },
-        mimeType: { type: "string", description: "MIME type: 'audio/mpeg', 'audio/ogg', 'audio/wav', 'video/mp4'" },
-        filename: { type: "string", description: "R2 bucket key if audio is already stored (e.g. 'voice/recording.mp3')" },
-        languageCode: { type: "string", description: "ISO 639-1 code if known (improves accuracy). Leave empty for auto-detect." },
-        diarize: { type: "boolean", description: "Identify different speakers (default false)" },
-        tagAudioEvents: { type: "boolean", description: "Tag non-speech events like [laughter], [music] (default true)" },
+        audioUrl: { type: "string", description: "Public URL to audio file (MP3, WAV, OGG, etc.)" },
+        audioBase64: { type: "string", description: "Base64 encoded audio data" },
+        mimeType: { type: "string", description: "MIME type: 'audio/mpeg', 'audio/ogg', 'audio/wav'" },
+        filename: { type: "string", description: "R2 bucket key if audio is already stored (e.g. 'voice/recording.wav')" },
       },
       required: [],
     },

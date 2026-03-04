@@ -93,14 +93,46 @@ app.get("/files/:path{.+$}", async (c) => {
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
 
-  // Ensure we have a content-type, fallback to octet-stream
   if (!headers.has("content-type")) {
     headers.set("content-type", "application/octet-stream");
   }
 
+  // Handle Range Requests for Audio/Video
+  const rangeHeader = c.req.header("range");
+  if (rangeHeader && object.size > 0) {
+    const parts = rangeHeader.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : object.size - 1;
+
+    if (start >= object.size || end >= object.size || start > end) {
+      headers.set("Content-Range", `bytes */${object.size}`);
+      return new Response(null, { status: 416, headers });
+    }
+
+    const chunk = object.body?.slice
+      ? object.body.slice(start, end + 1) // some environments support slice
+      : object.body; // Fallback, we'll try to rely on stream slice or let CF handle it if possible. 
+    // Actually, R2 API requires passing range inside the get() call for proper partial download.
+    // Let's re-fetch with range.
+
+    const partialObject = await c.env.FILES_BUCKET.get(path, {
+      range: { offset: start, length: end - start + 1 }
+    });
+
+    if (partialObject) {
+      headers.set("Content-Range", `bytes ${start}-${end}/${object.size}`);
+      headers.set("Content-Length", (end - start + 1).toString());
+      return new Response(partialObject.body, { status: 206, headers });
+    }
+  }
+
+  // Fallback to full object
+  headers.set("Content-Length", object.size.toString());
   return new Response(object.body, { headers });
 });
+
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 // Primary conversational endpoint. Always streams via SSE (x-stream: true is default).

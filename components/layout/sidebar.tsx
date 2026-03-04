@@ -14,6 +14,7 @@ import {
   WrenchIcon,
   DatabaseIcon,
   XIcon,
+  UserIcon,
 } from "lucide-react";
 import { NavItem } from "./nav-item";
 import { cn } from "@/lib/utils";
@@ -132,6 +133,11 @@ export function Sidebar() {
             href="/chat"
             label={isCollapsed ? "" : "Chat"}
             icon={MessageSquareIcon}
+          />
+          <NavItem
+            href="/profile"
+            label={isCollapsed ? "" : "Profile"}
+            icon={UserIcon}
           />
           <NavItem
             href="/agents"

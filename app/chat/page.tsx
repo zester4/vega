@@ -16,6 +16,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { nanoid } from "nanoid";
 import {
   ArrowUpIcon,
+  AudioLinesIcon,
   CopyIcon,
   PaperclipIcon,
   PlusIcon,
@@ -23,6 +24,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { MessageResponse } from "@/components/ai-elements/message";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -77,6 +79,8 @@ const TOOL_ICONS: Record<string, string> = {
   get_datetime: "🕐",
   github: "🐙",
   run_code: "💻",
+  text_to_speech: "🎤",
+  speech_to_text: "👂",
   default: "🛠️",
 };
 
@@ -278,8 +282,8 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                             <>
                               <p
                                 className={`text-[10px] uppercase mb-1 ${tool.errorText
-                                    ? "text-red-400"
-                                    : "text-[#6b6b7a]"
+                                  ? "text-red-400"
+                                  : "text-[#6b6b7a]"
                                   }`}
                               >
                                 {tool.errorText ? "Error" : "Output"}
@@ -341,13 +345,19 @@ function CopyButton({ text }: { text: string }) {
 // This inline version handles bold, inline code, and headers.
 
 function isImageUrl(url: string): boolean {
-  const u = url.trim().split(/\s/)[0] ?? url;
-  // Match R2/worker file URLs: .../files/generated/... or .../files/...
-  if (/\/files\/(generated\/)?[^\s]+/.test(u)) return true;
-  if (/workers\.dev\/files\//.test(u)) return true;
-  // Match common image extensions
-  if (/\.(png|jpe?g|gif|webp|svg)(\?.*)?$/i.test(u)) return true;
-  return false;
+  if (!url) return false;
+  // Clean URL of trailing junk (markdown closing parens, brackets, etc)
+  const u = url.trim().split(/[)\]\s]/)[0] ?? url;
+  if (u.includes("/files/generated/")) return true;
+  return /\.(jpg|jpeg|png|webp|gif|svg)(\?.*)?$/i.test(u);
+}
+
+function isAudioUrl(url: string): boolean {
+  if (!url) return false;
+  const u = url.trim().split(/[)\]\s]/)[0] ?? url;
+  if (u.includes("/files/voice/")) return true;
+  if (/\/files\/.*\.wav/.test(u)) return true; // specific R2 wav
+  return /\.(mp3|wav|ogg|m4a|aac)(\?.*)?$/i.test(u);
 }
 
 /** Extract image URLs from generate_image tool results for display as <img> */
@@ -371,25 +381,25 @@ function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: stri
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   return (
-    <div className="my-2 rounded-xl overflow-hidden border border-[#1e1e22] bg-[#111113] max-w-[400px]">
+    <span className="my-2 rounded-xl overflow-hidden border border-[#1e1e22] bg-[#111113] max-w-[400px] block">
       {!error ? (
         <>
           {!loaded && (
-            <div className="h-40 flex items-center justify-center text-[10px] text-[#6b6b7a] gap-2">
+            <span className="h-40 flex items-center justify-center text-[10px] text-[#6b6b7a] gap-2">
               <span className="inline-block size-2 rounded-full bg-[#00e5cc]/60 animate-pulse" />
               Loading image…
-            </div>
+            </span>
           )}
           <img
             src={url}
             alt={alt}
             onLoad={() => setLoaded(true)}
             onError={() => setError(true)}
-            className={`w-full object-cover rounded-xl transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0 h-0"}`}
+            className={`w-full object-contain rounded-xl transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0 h-0"}`}
           />
           {loaded && (
-            <div className="flex items-center justify-between px-3 py-1.5 border-t border-[#1e1e22]">
-              <span className="text-[10px] text-[#6b6b7a] truncate max-w-[200px]">{alt}</span>
+            <span className="flex items-center justify-between px-3 py-1.5 border-t border-[#1e1e22]">
+              <span className="text-[10px] text-[#6b6b7a] truncate max-w-[200px] block">{alt}</span>
               <a
                 href={url}
                 download
@@ -399,104 +409,68 @@ function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: stri
               >
                 ↓ Download
               </a>
-            </div>
+            </span>
           )}
         </>
       ) : (
-        <div className="px-3 py-2 text-[10px] text-red-400">⚠️ Could not load image</div>
+        <span className="px-3 py-2 text-[10px] text-red-400 block">⚠️ Could not load image</span>
       )}
-    </div>
+    </span>
   );
 }
 
-function SimpleMarkdown({ content }: { content: string }) {
-  const lines = content.split("\n");
-
-  const renderInline = (text: string): React.ReactNode[] => {
-    const parts: React.ReactNode[] = [];
-    let remaining = text;
-    let key = 0;
-
-    // Check for markdown image: ![alt](url)
-    const imgMdRe = /!\[([^\]]*)\]\(([^)]+)\)/;
-    // Check for bare image URLs
-    const imgUrlRe = /https?:\/\/\S+/g;
-
-    while (remaining.length > 0) {
-      // Try markdown image first
-      const imgMd = remaining.match(imgMdRe);
-      if (imgMd && imgMd.index !== undefined) {
-        if (imgMd.index > 0) parts.push(remaining.slice(0, imgMd.index));
-        const [, alt, url] = imgMd;
-        if (isImageUrl(url)) {
-          parts.push(<InlineImage key={key++} url={url} alt={alt || "Generated image"} />);
-        } else {
-          parts.push(<a key={key++} href={url} target="_blank" rel="noreferrer" className="text-[#00e5cc] underline">{alt || url}</a>);
-        }
-        remaining = remaining.slice((imgMd.index) + imgMd[0].length);
-        continue;
-      }
-
-      // Patterns for bold + inline code
-      const patterns = [
-        { re: /\*\*(.+?)\*\*/s, wrap: (m: string) => <strong key={key++} className="font-semibold text-[#e8e8ea]">{m}</strong> },
-        { re: /`([^`]+)`/, wrap: (m: string) => <code key={key++} className="bg-[#1e1e22] rounded px-1 text-[#00e5cc] font-mono text-[0.85em]">{m}</code> },
-      ] as const;
-
-      let earliest: { index: number; match: RegExpMatchArray; wrap: (m: string) => React.ReactNode } | null = null;
-      for (const { re, wrap } of patterns) {
-        const m = remaining.match(re);
-        if (m && m.index !== undefined) {
-          if (!earliest || m.index < earliest.index) earliest = { index: m.index, match: m, wrap };
-        }
-      }
-
-      // Also scan for raw image URLs
-      imgUrlRe.lastIndex = 0;
-      const urlMatch = imgUrlRe.exec(remaining);
-      if (urlMatch && isImageUrl(urlMatch[0])) {
-        const urlIndex = urlMatch.index;
-        if (!earliest || urlIndex < earliest.index) {
-          if (urlIndex > 0) parts.push(remaining.slice(0, urlIndex));
-          parts.push(<InlineImage key={key++} url={urlMatch[0]} />);
-          remaining = remaining.slice(urlIndex + urlMatch[0].length);
-          continue;
-        }
-      }
-
-      if (!earliest) { parts.push(remaining); break; }
-      if (earliest.index > 0) parts.push(remaining.slice(0, earliest.index));
-      parts.push(earliest.wrap(earliest.match[1]));
-      remaining = remaining.slice(earliest.index + earliest.match[0].length);
-    }
-    return parts;
-  };
+function InlineAudio({ url }: { url: string }) {
+  // Extract filename for display
+  const filename = url.split("/").pop()?.split(/[?#]/)[0] ?? "Audio Message";
 
   return (
-    <div className="space-y-1 sm:space-y-1.5">
-      {lines.map((line, i) => {
-        if (line.startsWith("### ")) return <h3 key={i} className="text-[11px] sm:text-xs font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(4))}</h3>;
-        if (line.startsWith("## ")) return <h2 key={i} className="text-[12px] sm:text-[13px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(3))}</h2>;
-        if (line.startsWith("# ")) return <h1 key={i} className="text-[13px] sm:text-[14px] font-bold text-[#e8e8ea] mt-2 mb-1">{renderInline(line.slice(2))}</h1>;
-        if (line.startsWith("- ") || line.startsWith("* ")) return (
-          <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
-            <span className="text-[#00e5cc] mt-0.5 shrink-0 select-none">·</span>
-            <span>{renderInline(line.slice(2))}</span>
-          </div>
-        );
-        const numMatch = line.match(/^(\d+)\. (.*)/);
-        if (numMatch) return (
-          <div key={i} className="flex gap-1 sm:gap-1.5 text-[11px] sm:text-xs">
-            <span className="text-[#00e5cc] shrink-0 font-mono text-[9px] sm:text-[10px] mt-0.5 select-none">{numMatch[1]}.</span>
-            <span>{renderInline(numMatch[2])}</span>
-          </div>
-        );
-        if (line.trim() === "") return <div key={i} className="h-1 sm:h-1.5" />;
-        return <p key={i} className="leading-relaxed text-[11px] sm:text-xs">{renderInline(line)}</p>;
-      })}
-    </div>
+    <span className="my-2 p-3 sm:p-4 rounded-xl border border-white/10 bg-white/5 backdrop-blur-md max-w-[400px] shadow-lg block">
+      <span className="flex items-center gap-3 mb-3">
+        <span className="size-10 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shadow-inner">
+          <AudioLinesIcon className="size-5 text-emerald-400" />
+        </span>
+        <span className="flex-1 min-w-0 flex flex-col">
+          <span className="text-[12px] font-bold text-white tracking-tight">VEGA Audio</span>
+          <span className="text-[10px] text-white/40 truncate font-mono">{filename}</span>
+        </span>
+      </span>
+      <audio
+        controls
+        src={url}
+        className="w-full h-9 brightness-90 contrast-125 saturate-50 opacity-90 hover:opacity-100 transition-opacity block"
+      />
+      <span className="mt-2 flex items-center justify-between px-1">
+        <span className="text-[10px] text-white/20 select-none uppercase tracking-widest font-mono">24kHz PCM</span>
+        <a href={url} download className="text-[10px] text-emerald-400 hover:text-emerald-300 transition-colors uppercase font-bold">Download</a>
+      </span>
+    </span>
   );
 }
+
+// ─── Streamdown Custom Components ───────────────────────────────────────────────
+
+const markdownComponents = {
+  a: ({ href, children }: any) => {
+    if (href && isAudioUrl(href)) {
+      return <InlineAudio url={href} />;
+    }
+    if (href && isImageUrl(href)) {
+      return <InlineImage url={href} alt={typeof children === "string" ? children : "Generated image"} />;
+    }
+    return (
+      <a href={href} target="_blank" rel="noreferrer" className="text-[#00e5cc] underline">
+        {children}
+      </a>
+    );
+  },
+  img: ({ src, alt }: any) => {
+    if (src && isImageUrl(src)) {
+      return <InlineImage url={src} alt={alt || "Generated image"} />;
+    }
+    // Fallback if it's an external image not matching our R2 rules
+    return <img src={src} alt={alt} className="max-w-full rounded-md" />;
+  },
+};
 
 // ─── In-progress Indicator ────────────────────────────────────────────────────
 
@@ -968,7 +942,10 @@ function ChatPageContent() {
                 {/* Response body */}
                 <div className="flex items-start gap-2 sm:gap-2.5">
                   <div className="border-l-2 border-[#00e5cc]/40 pl-3 py-0.5 text-[11px] sm:text-xs text-[#e8e8ea]/90 flex-1">
-                    <SimpleMarkdown content={msg.content} />
+                    <MessageResponse components={markdownComponents}>
+                      {msg.content}
+                    </MessageResponse>
+
                   </div>
                   <div className="opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
                     <CopyButton text={msg.content} />

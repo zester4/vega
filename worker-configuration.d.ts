@@ -52,7 +52,6 @@ interface Env {
   TWILIO_AUTH_TOKEN: string;  // Twilio auth token
   TWILIO_FROM_NUMBER: string;  // Twilio phone number (E.164)
   BROWSERLESS_TOKEN: string;  // Browserless.io API token for headless browser
-  ELEVENLABS_API_KEY: string;  // ElevenLabs API key for text-to-speech
 
   // ── Cloudflare Bindings ────────────────────────────────────────────────────
   FILES_BUCKET: vega_agent_files;              // R2 bucket for persistent file storage

@@ -284,7 +284,7 @@ export class TelegramBot {
         const form = new FormData();
         form.append("chat_id", String(chatId));
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        form.append("voice", new Blob([audioBytes] as any, { type: "audio/mpeg" }), "voice.mp3");
+        form.append("voice", new Blob([audioBytes] as any, { type: "audio/wav" }), "voice.wav");
         if (opts.reply_to_message_id) form.append("reply_to_message_id", String(opts.reply_to_message_id));
         if (opts.caption) {
             form.append("caption", opts.caption.slice(0, 1024));
@@ -400,7 +400,7 @@ I'm an autonomous AI agent that can:
 🔔 <b>Schedule Jobs</b> — Recurring cron jobs with proactive alerts
 🎨 <b>Generate Images</b> — Gemini Nano Banana 2 image generation
 📊 <b>Market Intelligence</b> — Live prices, portfolio tracking, price alerts
-🎙️ <b>Voice Mode</b> — Send voice, get voice replies (ElevenLabs)
+🎙️ <b>Voice Mode</b> — Send voice, get Gemini voice replies (30+ voices)
 🌍 <b>25+ Languages</b> — Auto-detects, translates, responds in your language
 🎯 <b>Goal Tracking</b> — Long-term goal pursuit across sessions
 
@@ -428,7 +428,7 @@ I'm an autonomous AI agent that can:
 /tasks — Background tasks (sub-agents & workflows)
 /memory — Stored memories for this chat
 /goals — Active goal tracker with progress bars
-/voice_on — Enable voice replies (ElevenLabs TTS)
+/voice_on — Enable Gemini voice replies
 /voice_off — Disable voice replies
 
 <b>Tips:</b>
@@ -643,7 +643,7 @@ async function processMessage(
     let fullMessage = userText;
     let transcribedVoice = false;
 
-    // ── VOICE MESSAGE → Transcribe with ElevenLabs STT ──────────────────────────
+    // ── VOICE MESSAGE → Transcribe with Gemini STT ──────────────────────────────
     if (msg.voice?.file_id) {
         try {
             await bot.sendChatAction(chatId, "typing");
@@ -655,7 +655,7 @@ async function processMessage(
                 transcribedVoice = true;
                 console.log(`[Telegram Voice] Transcribed: "${transcript.slice(0, 100)}"`);
             } else {
-                fullMessage = "[User sent a voice message — transcription unavailable. Configure ELEVENLABS_API_KEY.]";
+                fullMessage = "[User sent a voice message — transcription unavailable.]";
             }
         } catch (voiceErr) {
             console.error("[Telegram Voice] STT failed:", voiceErr);

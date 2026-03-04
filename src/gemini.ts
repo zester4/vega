@@ -12,6 +12,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 export const MODEL = "gemini-3.1-flash-lite-preview";
+export const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 let _ai: GoogleGenAI | null = null;
@@ -208,4 +209,74 @@ export async function analyzeImage(
     config: { thinkingConfig: { includeThoughts: false } },
   });
   return response.text ?? "";
+}
+
+// ─── TTS: text to speech generation ─────────────────────────────────────────
+export async function generateGeminiAudio(
+  apiKey: string,
+  text: string,
+  voiceName = "Puck",
+  speechConfig?: any
+): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
+  const ai = getAI(apiKey);
+  try {
+    const response = await ai.models.generateContent({
+      model: TTS_MODEL,
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: speechConfig ?? {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName },
+          },
+        },
+      },
+    });
+
+    const inlineData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    if (!inlineData || !inlineData.data) return null;
+
+    const base64Data = inlineData.data;
+    const mimeType = inlineData.mimeType || "audio/pcm";
+
+    // Decode base64 to Uint8Array
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return { bytes, mimeType };
+  } catch (err) {
+    console.error("[generateGeminiAudio error]", err);
+    return null;
+  }
+}
+
+// ─── STT: speech to text transcription ──────────────────────────────────────
+export async function transcribeGeminiAudio(
+  apiKey: string,
+  audioBase64: string,
+  mimeType: string,
+  prompt = "Please transcribe this audio exactly as it is spoken. Do not add any extra text or commentary."
+): Promise<string> {
+  const ai = getAI(apiKey);
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL, // Use core model for audio understanding/STT
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inlineData: { data: audioBase64, mimeType } },
+            { text: prompt },
+          ],
+        },
+      ],
+      config: { thinkingConfig: { includeThoughts: false } },
+    });
+    return response.text ?? "";
+  } catch (err) {
+    console.error("[transcribeGeminiAudio error]", err);
+    return "";
+  }
 }

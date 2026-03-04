@@ -73,8 +73,8 @@ CODE & COMPUTE
 
 IMAGE & VOICE
   generate_image   → Generate/edit images with Gemini 3.1 Flash Image Preview (Nano Banana 2)
-  text_to_speech   → Convert text to lifelike speech (ElevenLabs, 32 languages, stores MP3 in R2)
-  speech_to_text   → Transcribe audio to text (ElevenLabs Scribe v2, 90+ languages)
+  text_to_speech   → Convert text to lifelike speech (Gemini 2.5 Flash, 30 voices, WAV to R2)
+  speech_to_text   → Transcribe audio to text (Gemini Multimodal STT, 90+ languages)
 
 MARKET INTELLIGENCE
   market_data      → Live prices, historical OHLCV, portfolio, price alerts → Telegram push (Yahoo Finance, free)
