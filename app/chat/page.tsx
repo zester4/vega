@@ -591,32 +591,39 @@ function ChatPageContent() {
 
     const checkPending = async () => {
       try {
-        const res = await fetch("/api/agents/pending");
-        const data = (await res.json()) as { messages?: any[] };
+        const res = await fetch(`/api/agents/pending-pushes?session=${sessionId}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          pushes?: Array<{
+            type: string;
+            agentName: string;
+            status: string;
+            message: string;
+            ts: number;
+          }>;
+        };
 
-        if (data.messages && data.messages.length > 0) {
-          const newMessages: ChatMessage[] = data.messages.map((msg: any) => ({
+        if (data.pushes && data.pushes.length > 0) {
+          const newMessages: ChatMessage[] = data.pushes.map((push) => ({
             id: nanoid(),
-            role: "assistant",
-            content: msg.synthesis,
-            timestamp: Date.now(),
+            role: "assistant" as const,
+            content: push.message,
+            timestamp: push.ts ?? Date.now(),
           }));
 
           setMessages((prev) => {
             const updated = [...prev, ...newMessages];
-            // We use a small timeout to let state update before persisting
             setTimeout(() => persistMessages(updated), 0);
             return updated;
           });
         }
       } catch (err) {
-        console.warn("[pending check failed]", err);
+        console.warn("[pending-pushes check failed]", err);
       }
     };
 
-    // Check on load + every 30s
     checkPending();
-    const interval = setInterval(checkPending, 30_000);
+    const interval = setInterval(checkPending, 15_000);
     return () => clearInterval(interval);
   }, [sessionId, persistMessages]);
 

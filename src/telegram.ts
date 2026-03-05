@@ -17,12 +17,13 @@
  *
  * Features:
  *   - Live tool-execution progress (edits a message as tools run)
- *   - Full Markdown → Telegram HTML conversion
+ *   - Full Markdown → Telegram HTML conversion (blockquotes, spoilers, code langs)
+ *   - HTML-aware message splitting (never breaks tags or code blocks)
  *   - Commands: /start /help /reset /status /tasks /memory
  *   - Photo/document pass-through to agent
  *   - Rate limiting (10 msg/min per user)
  *   - Multi-user: each chat_id gets its own VEGA session in Redis
- *   - 4096 char limit handling (splits long messages automatically)
+ *   - 4096 char limit handling (splits long messages beautifully)
  *
  * ============================================================================
  */
@@ -161,7 +162,6 @@ export class TelegramBot {
         text: string,
         opts: SendMessageOptions = {}
     ): Promise<TelegramMessage> {
-        // Split if over 4096 chars — Telegram hard limit
         if (text.length <= 4096) {
             return this.call<TelegramMessage>("sendMessage", {
                 chat_id: chatId,
@@ -173,8 +173,8 @@ export class TelegramBot {
             });
         }
 
-        // Split long message into chunks
-        const chunks = splitMessage(text, 4000);
+        // HTML-aware split for long messages
+        const chunks = splitMessageSafe(text, 4000);
         let lastMsg!: TelegramMessage;
         for (const chunk of chunks) {
             lastMsg = await this.call<TelegramMessage>("sendMessage", {
@@ -202,7 +202,6 @@ export class TelegramBot {
                 disable_web_page_preview: true,
             });
         } catch (e) {
-            // Ignore "message is not modified" errors — content was the same
             if (String(e).includes("not modified")) return true;
             throw e;
         }
@@ -278,13 +277,19 @@ export class TelegramBot {
 
     async sendVoice(
         chatId: number | string,
-        audioBytes: Uint8Array,
+        voice: Uint8Array | string,
         opts: { reply_to_message_id?: number; caption?: string } = {}
     ): Promise<TelegramMessage> {
         const form = new FormData();
         form.append("chat_id", String(chatId));
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        form.append("voice", new Blob([audioBytes] as any, { type: "audio/wav" }), "voice.wav");
+
+        if (typeof voice === "string") {
+            form.append("voice", voice);
+        } else {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            form.append("voice", new Blob([voice] as any, { type: "audio/wav" }), "voice.wav");
+        }
+
         if (opts.reply_to_message_id) form.append("reply_to_message_id", String(opts.reply_to_message_id));
         if (opts.caption) {
             form.append("caption", opts.caption.slice(0, 1024));
@@ -329,7 +334,6 @@ export async function handleTelegramUpdate(
 ): Promise<void> {
     const bot = new TelegramBot(config.token);
 
-    // Handle callback query (inline button press)
     if (update.callback_query) {
         await handleCallbackQuery(update.callback_query, bot, env, config);
         return;
@@ -342,7 +346,6 @@ export async function handleTelegramUpdate(
     const userId = msg.from?.id;
     const text = msg.text ?? msg.caption ?? "";
 
-    // Ignore non-text non-media messages (stickers, polls, etc.)
     if (!text && !msg.photo && !msg.document && !msg.voice) return;
 
     // ── Rate limiting: 10 messages/min per user ───────────────────────────────
@@ -354,7 +357,7 @@ export async function handleTelegramUpdate(
         if (count === 1) await redis.expire(rateKey, 60);
         if (count > 10) {
             await bot.sendMessage(chatId,
-                "⚠️ <b>Rate limit reached.</b>\nMax 10 messages/minute. Please wait a moment.",
+                buildRateLimitMessage(),
                 { parse_mode: "HTML" }
             );
             return;
@@ -369,6 +372,231 @@ export async function handleTelegramUpdate(
 
     // ── Regular message → run agent ───────────────────────────────────────────
     await processMessage(msg, text, bot, env, config);
+}
+
+// ─── Message Builders (beautiful, consistent HTML) ────────────────────────────
+
+function buildRateLimitMessage(): string {
+    return [
+        `⚠️ <b>Slow down a little!</b>`,
+        ``,
+        `You've hit the rate limit of <b>10 messages per minute</b>.`,
+        `Please wait a moment before sending more. ⏳`,
+    ].join("\n");
+}
+
+function buildStartMessage(firstName: string): string {
+    return [
+        `👋 <b>Hey ${escapeHtml(firstName)}! I'm VEGA.</b>`,
+        ``,
+        `I'm an autonomous AI agent. Here's what I can do:`,
+        ``,
+        `🔍 <b>Search &amp; Browse</b>  —  Web search, headless browser, Firecrawl deep scraping`,
+        `🧠 <b>Remember Forever</b>  —  Persistent memory + vector semantic recall`,
+        `💻 <b>Run Code</b>  —  Execute Python, analyze data, generate charts`,
+        `🤖 <b>Spawn Sub-agents</b>  —  Parallel AI workers for complex tasks`,
+        `📁 <b>Manage Files</b>  —  R2 cloud storage for reports and documents`,
+        `⚙️ <b>Build New Tools</b>  —  Self-extends capabilities on demand`,
+        `🔔 <b>Schedule Jobs</b>  —  Recurring cron jobs with proactive alerts`,
+        `🎨 <b>Generate Images</b>  —  Nano Banana 2 image generation`,
+        `📊 <b>Market Intelligence</b>  —  Live prices, portfolio tracking, price alerts`,
+        `🎙️ <b>Voice Mode</b>  —  Send voice, get Gemini voice replies (30+ voices)`,
+        `🌍 <b>25+ Languages</b>  —  Auto-detects and responds in your language`,
+        `🎯 <b>Goal Tracking</b>  —  Long-term goal pursuit across sessions`,
+        ``,
+        `<b>Commands:</b>`,
+        `/help — Full command list`,
+        `/reset — Clear conversation history`,
+        `/status — Agent status &amp; heartbeat`,
+        `/tasks — Background tasks &amp; cron jobs`,
+        `/memory — Stored memories`,
+        `/goals — Active goal tracker`,
+        `/tools — List all available agent tools`,
+        `/heartbeat — Ensure system cron is active`,
+        `/voice_on — Enable voice replies`,
+        `/voice_off — Disable voice replies`,
+    ].join("\n");
+}
+
+function buildHelpMessage(): string {
+    return [
+        `<b>📖 VEGA — Command Reference</b>`,
+        ``,
+        `<b>Core</b>`,
+        `/start  —  Welcome message &amp; capabilities`,
+        `/help  —  This reference`,
+        `/reset  —  Clear this conversation's history`,
+        `/status  —  Agent status and uptime`,
+        ``,
+        `<b>Data &amp; Memory</b>`,
+        `/tasks  —  Background tasks (sub-agents &amp; workflows)`,
+        `/memory  —  Stored memories for this chat`,
+        `/goals  —  Active goal tracker with progress bars`,
+        `/tools  —  All available agent tools`,
+        ``,
+        `<b>System</b>`,
+        `/heartbeat  —  Ensure system cron is active`,
+        `/voice_on  —  Enable Gemini voice replies`,
+        `/voice_off  —  Disable voice replies`,
+        ``,
+        `<b>💡 Pro Tips</b>`,
+        `• Send a <b>voice message</b> — I'll transcribe and respond`,
+        `• Send a <b>photo</b> — I'll analyze it with Gemini Vision`,
+        `• <i>"Generate an image of..."</i> — Nano Banana 2 image gen`,
+        `• <i>"What's the price of BTC?"</i> — live Yahoo Finance data`,
+        `• <i>"Track goal: ..."</i> — I'll remember and pursue it`,
+        `• <i>"Set a price alert for AAPL above $200"</i> — push alerts`,
+        `• <i>"Create a tool that..."</i> — extend my capabilities on the fly`,
+        `• <i>"Translate this to Spanish:"</i> — 32+ languages supported`,
+    ].join("\n");
+}
+
+function buildStatusMessage(uptime: string, errors: number, reflection?: string): string {
+    const errorEmoji = errors === 0 ? "✅" : errors < 5 ? "⚠️" : "🔴";
+    const lines = [
+        `<b>⚡ VEGA System Status</b>`,
+        ``,
+        `🟢  <b>Core:</b>  Active`,
+        `🔄  <b>Last heartbeat:</b>  ${escapeHtml(uptime)}`,
+        `${errorEmoji}  <b>Recent errors:</b>  ${errors}`,
+        `🌐  <b>Platform:</b>  Cloudflare Workers Edge`,
+    ];
+    if (reflection) {
+        lines.push(``, `<blockquote>${escapeHtml(reflection)}</blockquote>`);
+    }
+    return lines.join("\n");
+}
+
+function buildTasksMessage(agents: Array<{ agentName?: string; agentId?: string; status?: string }>): string {
+    const lines = [`<b>🤖 Background Tasks</b>`, ``];
+    for (const a of agents.slice(0, 8)) {
+        const icon = a.status === "running" ? "⏳" : a.status === "done" ? "✅" : "❌";
+        const name = escapeHtml(a.agentName ?? "Unknown");
+        const id = escapeHtml(a.agentId ?? "—");
+        const status = escapeHtml(a.status ?? "unknown");
+        lines.push(`${icon}  <b>${name}</b>`);
+        lines.push(`    ID: <code>${id}</code>  ·  Status: <i>${status}</i>`);
+        lines.push(``);
+    }
+    return lines.join("\n").trim();
+}
+
+function buildMemoryMessage(
+    entries: Array<{ key: string; value: string }>,
+    total: number
+): string {
+    const lines = [`<b>🧠 Stored Memories</b>  <i>(${total} total)</i>`, ``];
+    for (const { key, value } of entries) {
+        lines.push(`• <b>${escapeHtml(key)}</b>`);
+        lines.push(`  <i>${escapeHtml(value.slice(0, 80))}${value.length > 80 ? "…" : ""}</i>`);
+    }
+    if (total > entries.length) {
+        lines.push(``, `<i>…and ${total - entries.length} more stored memories</i>`);
+    }
+    return lines.join("\n");
+}
+
+function buildToolsMessage(builtinNames: string[], customNames: string[]): string {
+    const lines = [
+        `<b>🔧 Available Tools</b>`,
+        ``,
+        `<b>Built-in  (${builtinNames.length})</b>`,
+        builtinNames.map(n => `<code>${n}</code>`).join("  "),
+    ];
+    if (customNames.length > 0) {
+        lines.push(``, `<b>Custom — Self-built  (${customNames.length})</b>`);
+        lines.push(customNames.map(n => `<code>${n}</code>`).join("  "));
+    }
+    lines.push(``, `<i>Tip: Ask me what any tool does to learn more!</i>`);
+    return lines.join("\n");
+}
+
+function buildHeartbeatMessage(result: { success: boolean; status?: string; cron?: string; error?: string }): string {
+    if (!result.success) {
+        return `❌ <b>Heartbeat Setup Failed</b>\n\n<code>${escapeHtml(result.error ?? "Unknown error")}</code>`;
+    }
+    return [
+        `✅ <b>System Heartbeat Active</b>`,
+        ``,
+        `<b>Status:</b>  ${escapeHtml(result.status ?? "registered")}`,
+        `<b>Schedule:</b>  <code>${escapeHtml(result.cron ?? "—")}</code>`,
+        `<b>Purpose:</b>  Reflection, self-healing, tool evolution`,
+        ``,
+        `<i>VEGA is now autonomously monitoring itself every hour.</i>`,
+    ].join("\n");
+}
+
+function buildGoalsMessage(
+    goals: Array<{ id: string; title: string; progress: number; priority: string; status: string; nextAction?: string }>,
+    activeCount: number,
+    total: number
+): string {
+    const lines = [`<b>🎯 Active Goals</b>  <i>(${activeCount} active)</i>`, ``];
+
+    for (const goal of goals.slice(0, 8)) {
+        const filled = Math.round(goal.progress / 10);
+        const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+        const pIcon =
+            goal.priority === "critical" ? "🔴" :
+                goal.priority === "high" ? "🟠" :
+                    goal.priority === "medium" ? "🟡" : "🟢";
+
+        lines.push(`${pIcon} <b>${escapeHtml(goal.title)}</b>`);
+        lines.push(`<code>[${bar}]</code>  <b>${goal.progress}%</b>`);
+        if (goal.nextAction) {
+            lines.push(`<blockquote>📌 ${escapeHtml(goal.nextAction.slice(0, 120))}</blockquote>`);
+        }
+        lines.push(``);
+    }
+
+    if (total > 8) {
+        lines.push(`<i>…and ${total - 8} more goals</i>`);
+    }
+
+    return lines.join("\n").trim();
+}
+
+// ─── Progress Message Builder ─────────────────────────────────────────────────
+
+/**
+ * Build the live "Working…" progress message shown while the agent runs.
+ * Uses tool categories and a clean visual layout.
+ */
+function buildProgressMessage(
+    activeTools: string[],
+    completedTools: string[],
+    preamble?: string
+): string {
+    const lines: string[] = [];
+
+    if (preamble) {
+        lines.push(preamble, ``);
+    }
+
+    if (activeTools.length === 0 && completedTools.length === 0) {
+        lines.push(`⚙️ <b>Starting up…</b>`);
+        return lines.join("\n");
+    }
+
+    const currentTool = activeTools[activeTools.length - 1];
+
+    if (currentTool) {
+        const icon = getTelegramToolIcon(currentTool);
+        const category = getToolCategory(currentTool);
+        lines.push(`⚙️ <b>Working…</b>  <i>${escapeHtml(category)}</i>`);
+        lines.push(``);
+        lines.push(`${icon}  Running  <code>${escapeHtml(currentTool)}</code>`);
+    } else {
+        lines.push(`⚙️ <b>Finalizing response…</b>`);
+    }
+
+    if (completedTools.length > 0) {
+        const last3 = completedTools.slice(-3);
+        lines.push(``);
+        lines.push(`<i>Completed: ${last3.map(t => `<code>${escapeHtml(t)}</code>`).join("  ")}</i>`);
+    }
+
+    return lines.join("\n");
 }
 
 // ─── Command Handlers ─────────────────────────────────────────────────────────
@@ -386,65 +614,12 @@ async function handleCommand(
     switch (command) {
         case "/start": {
             const name = msg.from?.first_name ?? "there";
-            await bot.sendMessage(chatId, `
-👋 <b>Hey ${escapeHtml(name)}! I'm VEGA.</b>
-
-I'm an autonomous AI agent that can:
-
-🔍 <b>Search & Browse</b> — Web search, headless browser, Firecrawl deep scraping
-🧠 <b>Remember Forever</b> — Persistent memory + vector semantic recall across all sessions
-💻 <b>Run Code</b> — Execute Python, analyze data, generate charts
-🤖 <b>Spawn Sub-agents</b> — Parallel AI workers for complex tasks
-📁 <b>Manage Files</b> — R2 cloud storage for reports and documents
-⚙️ <b>Build New Tools</b> — Self-extends capabilities on demand
-🔔 <b>Schedule Jobs</b> — Recurring cron jobs with proactive alerts
-🎨 <b>Generate Images</b> — Gemini Nano Banana 2 image generation
-📊 <b>Market Intelligence</b> — Live prices, portfolio tracking, price alerts
-🎙️ <b>Voice Mode</b> — Send voice, get Gemini voice replies (30+ voices)
-🌍 <b>25+ Languages</b> — Auto-detects, translates, responds in your language
-🎯 <b>Goal Tracking</b> — Long-term goal pursuit across sessions
-
-<b>Commands:</b>
-/help — Full command list
-/reset — Clear conversation history
-/status — Agent status & heartbeat
-/tasks — Background tasks & cron jobs
-/memory — Stored memories
-/goals — Active goal tracker
-/tools — List all available agent tools
-/heartbeat — Ensure system cron is active
-/voice_on — Enable voice replies
-/voice_off — Disable voice replies
-      `.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(chatId, buildStartMessage(name), { parse_mode: "HTML" });
             break;
         }
 
         case "/help": {
-            await bot.sendMessage(chatId, `
-<b>VEGA Commands</b>
-
-/start — Welcome message & capabilities
-/help — This help message
-/reset — Clear this conversation's history
-/status — Check agent status and uptime
-/tasks — Background tasks (sub-agents & workflows)
-/memory — Stored memories for this chat
-/goals — Active goal tracker with progress bars
-/tools — List all available agent tools
-/heartbeat — Ensure system cron is active
-/voice_on — Enable Gemini voice replies
-/voice_off — Disable voice replies
-
-<b>Tips:</b>
-• Send a voice message — I'll transcribe and respond
-• Send a photo — I'll analyze it with Gemini Vision
-• "Generate an image of..." — Nano Banana 2 image gen
-• "What's the price of BTC?" — live Yahoo Finance data
-• "Track goal: ..." — I'll remember and pursue it
-• "Translate this to Spanish: ..." — 32+ languages
-• "Set a price alert for AAPL above $200" — proactive push
-• "Create a tool that..." — extend my capabilities on the fly
-      `.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(chatId, buildHelpMessage(), { parse_mode: "HTML" });
             break;
         }
 
@@ -458,25 +633,17 @@ I'm an autonomous AI agent that can:
 
             if (!result.goals?.length) {
                 await bot.sendMessage(chatId,
-                    "\ud83c\udfaf <b>No goals set yet.</b>\n\nTell me your goals and I'll track and pursue them automatically!",
+                    `🎯 <b>No goals set yet.</b>\n\nTell me your goals and I'll track and pursue them automatically!`,
                     { parse_mode: "HTML" }
                 );
                 break;
             }
 
-            let goalsText = `<b>\ud83c\udfaf Active Goals</b> (${result.activeCount ?? 0} active)\n\n`;
-            for (const goal of result.goals.slice(0, 8)) {
-                const filled = Math.round(goal.progress / 10);
-                const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
-                const pIcon = goal.priority === "critical" ? "\ud83d\udd34" : goal.priority === "high" ? "\ud83d\udfe0" : goal.priority === "medium" ? "\ud83d\udfe1" : "\ud83d";
-                goalsText += `${pIcon} <b>${escapeHtml(goal.title)}</b>\n`;
-                goalsText += `[${bar}] ${goal.progress}%\n`;
-                if (goal.nextAction) goalsText += `\ud83d\udccc <i>${escapeHtml(goal.nextAction.slice(0, 80))}</i>\n`;
-                goalsText += "\n";
-            }
-            if ((result.goals.length ?? 0) > 8) goalsText += `<i>\u2026and ${result.goals.length - 8} more</i>`;
-
-            await bot.sendMessage(chatId, goalsText.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(
+                chatId,
+                buildGoalsMessage(result.goals, result.activeCount ?? 0, result.goals.length),
+                { parse_mode: "HTML" }
+            );
             break;
         }
 
@@ -485,7 +652,7 @@ I'm an autonomous AI agent that can:
             const redis = getRedis(env);
             await redis.set(`tg:voice:${chatId}`, "1", { ex: 60 * 60 * 24 * 30 });
             await bot.sendMessage(chatId,
-                "🎙️ <b>Voice replies enabled!</b>\nI'll respond with voice messages now. Send me a voice message to try it!\n\nSend /voice_off to disable.",
+                `🎙️ <b>Voice replies enabled!</b>\n\nI'll now respond with voice messages. Send me a voice message to try it out!\n\n<i>Send /voice_off to switch back to text.</i>`,
                 { parse_mode: "HTML" }
             );
             break;
@@ -495,7 +662,10 @@ I'm an autonomous AI agent that can:
             const { getRedis } = await import("./memory");
             const redis = getRedis(env);
             await redis.del(`tg:voice:${chatId}`);
-            await bot.sendMessage(chatId, "\ud83d\udd07 <b>Voice replies disabled.</b> Text mode restored.", { parse_mode: "HTML" });
+            await bot.sendMessage(chatId,
+                `🔇 <b>Voice replies disabled.</b>  Text mode restored.`,
+                { parse_mode: "HTML" }
+            );
             break;
         }
 
@@ -506,14 +676,13 @@ I'm an autonomous AI agent that can:
             const sessionId = await redis.get(sessionKey) as string | null;
 
             if (sessionId) {
-                // Clear the session history
                 await redis.del(`session:${sessionId}:history`);
                 await redis.del(`session:${sessionId}`);
                 await redis.del(sessionKey);
             }
 
             await bot.sendMessage(chatId,
-                "🔄 <b>Conversation reset.</b>\nI've cleared our chat history. Fresh start!",
+                `🔄 <b>Conversation reset.</b>\n\nChat history cleared — fresh start! ✨`,
                 { parse_mode: "HTML" }
             );
             break;
@@ -522,25 +691,15 @@ I'm an autonomous AI agent that can:
         case "/status": {
             const { getRedis } = await import("./memory");
             const redis = getRedis(env);
-
             const lastTick = await redis.get("agent:last-tick") as string | null;
             const errors = await redis.llen("agent:errors");
             const tick = lastTick ? JSON.parse(lastTick) : null;
+            const uptime = tick ? formatRelativeTime(tick.timestamp) : "No heartbeat yet";
 
-            const uptime = tick
-                ? formatRelativeTime(tick.timestamp)
-                : "No heartbeat yet";
-
-            await bot.sendMessage(chatId, `
-<b>⚡ VEGA Status</b>
-
-🟢 <b>Core:</b> Active
-🔄 <b>Last heartbeat:</b> ${uptime}
-⚠️ <b>Recent errors:</b> ${errors}
-🌐 <b>Platform:</b> Cloudflare Workers Edge
-
-${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
-      `.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(chatId,
+                buildStatusMessage(uptime, errors, tick?.reflection),
+                { parse_mode: "HTML" }
+            );
             break;
         }
 
@@ -551,7 +710,7 @@ ${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
 
             if (raw.length === 0) {
                 await bot.sendMessage(chatId,
-                    "📋 <b>No background tasks running.</b>",
+                    `📋 <b>No background tasks running.</b>\n\n<i>Spawn a sub-agent or trigger a workflow to see tasks here.</i>`,
                     { parse_mode: "HTML" }
                 );
                 break;
@@ -561,15 +720,7 @@ ${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
                 try { return JSON.parse(r); } catch { return null; }
             }).filter(Boolean);
 
-            let list = "<b>🤖 Background Tasks</b>\n\n";
-            for (const a of agents.slice(0, 8)) {
-                const icon = a.status === "running" ? "⏳" : a.status === "done" ? "✅" : "❌";
-                list += `${icon} <b>${escapeHtml(a.agentName ?? "Unknown")}</b>\n`;
-                list += `   ID: <code>${a.agentId}</code>\n`;
-                list += `   Status: ${a.status}\n\n`;
-            }
-
-            await bot.sendMessage(chatId, list.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(chatId, buildTasksMessage(agents), { parse_mode: "HTML" });
             break;
         }
 
@@ -580,32 +731,31 @@ ${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
 
             if (!chatSession) {
                 await bot.sendMessage(chatId,
-                    "🧠 <b>No memories yet.</b>\nStart chatting and I'll remember important things!",
+                    `🧠 <b>No memories yet.</b>\n\nStart chatting and I'll remember important things automatically!`,
                     { parse_mode: "HTML" }
                 );
                 break;
             }
 
             const keys = await redis.keys("agent:memory:*") as string[];
-            const tgKeys = keys.slice(0, 15);
 
-            if (tgKeys.length === 0) {
+            if (keys.length === 0) {
                 await bot.sendMessage(chatId,
-                    "🧠 <b>Memory is empty.</b>\nAsk me to remember something!",
+                    `🧠 <b>Memory is empty.</b>\n\nAsk me to remember something!`,
                     { parse_mode: "HTML" }
                 );
                 break;
             }
 
-            let memList = `<b>🧠 Stored Memories</b> (${tgKeys.length})\n\n`;
-            for (const key of tgKeys.slice(0, 10)) {
-                const cleanKey = key.replace("agent:memory:", "");
-                const val = await redis.get(key) as string | null;
-                memList += `• <b>${escapeHtml(cleanKey)}</b>: ${escapeHtml(String(val ?? "").slice(0, 60))}\n`;
-            }
-            if (tgKeys.length > 10) memList += `\n<i>…and ${tgKeys.length - 10} more</i>`;
+            const displayKeys = keys.slice(0, 10);
+            const entries: Array<{ key: string; value: string }> = [];
 
-            await bot.sendMessage(chatId, memList.trim(), { parse_mode: "HTML" });
+            for (const key of displayKeys) {
+                const val = await redis.get(key) as string | null;
+                entries.push({ key: key.replace("agent:memory:", ""), value: String(val ?? "") });
+            }
+
+            await bot.sendMessage(chatId, buildMemoryMessage(entries, keys.length), { parse_mode: "HTML" });
             break;
         }
 
@@ -615,53 +765,30 @@ ${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
             const redis = getRedis(env);
             const customTools = await listTools(redis);
 
-            let list = "<b>🔧 Available Tools</b>\n\n";
+            const builtinNames = BUILTIN_DECLARATIONS.map(t => t.name);
+            const customNames = customTools.map(t => t.name);
 
-            list += "<b>Built-in:</b>\n";
-            const builtinNames = BUILTIN_DECLARATIONS.map(t => `<code>${t.name}</code>`).join(", ");
-            list += builtinNames + "\n\n";
-
-            if (customTools.length > 0) {
-                list += "<b>Custom (Self-built):</b>\n";
-                const customNames = customTools.map(t => `<code>${t.name}</code>`).join(", ");
-                list += customNames + "\n\n";
-            }
-
-            list += "<i>Tip: Ask me what any tool does to learn more!</i>";
-
-            await bot.sendMessage(chatId, list.trim(), { parse_mode: "HTML" });
+            await bot.sendMessage(chatId, buildToolsMessage(builtinNames, customNames), { parse_mode: "HTML" });
             break;
         }
 
         case "/heartbeat": {
             const { executeTool } = await import("./tools/builtins");
             await bot.sendChatAction(chatId, "typing");
-            const result = await executeTool("setup_system_heartbeat", {}, env);
-            
-            if (result.success) {
-                await bot.sendMessage(chatId, `
-✅ <b>System Heartbeat Active</b>
-
-<b>Status:</b> ${result.status ?? "registered"}
-<b>Schedule:</b> <code>${result.cron}</code>
-<b>Purpose:</b> Reflection, self-healing, tool evolution
-
-VEGA is now autonomously monitoring itself every hour.
-                `.trim(), { parse_mode: "HTML" });
-            } else {
-                await bot.sendMessage(chatId, `❌ <b>Failed to setup heartbeat:</b> ${result.error}`, { parse_mode: "HTML" });
-            }
+            const result = await executeTool("setup_system_heartbeat", {}, env) as {
+                success: boolean; status?: string; cron?: string; error?: string;
+            };
+            await bot.sendMessage(chatId, buildHeartbeatMessage(result), { parse_mode: "HTML" });
             break;
         }
 
         default: {
-            // Unknown command — treat as regular message
             const args = text.slice(command.length).trim();
             if (args) {
                 await processMessage(msg, args, bot, env, config);
             } else {
                 await bot.sendMessage(chatId,
-                    `Unknown command. Type /help to see available commands.`,
+                    `❓ Unknown command: <code>${escapeHtml(command)}</code>\n\nType /help to see all available commands.`,
                     { parse_mode: "HTML" }
                 );
             }
@@ -715,7 +842,6 @@ async function processMessage(
     // ── PHOTO → Gemini Vision description ───────────────────────────────────────
     if (msg.photo && msg.photo.length > 0) {
         try {
-            // Download highest resolution photo
             const photo = msg.photo[msg.photo.length - 1];
             const file = await bot.getFile(photo.file_id);
             const imageBytes = await bot.downloadFile(file.file_path);
@@ -753,7 +879,6 @@ async function processMessage(
             const { uploadToGemini } = await import("./gemini");
             const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, mimeType, msg.document.file_name);
 
-            // Store attachment data on the msg object temporarily for use in runAgent call below
             (msg as any)._vega_attachment = {
                 mimeType,
                 data: btoa(String.fromCharCode(...bytes)),
@@ -763,7 +888,7 @@ async function processMessage(
             fullMessage = userText
                 ? `[User sent document: ${msg.document.file_name ?? "unknown"}] ${userText}`
                 : `[User sent document: ${msg.document.file_name ?? "unknown"}] Analyze this file.`;
-            
+
             console.log(`[Telegram Document] Uploaded to Gemini: ${fileUri} (${mimeType})`);
         } catch (docErr) {
             console.error("[Telegram Document] Failed:", docErr);
@@ -773,7 +898,7 @@ async function processMessage(
 
     if (!fullMessage.trim()) return;
 
-    // ── Auto-detect language for multi-language support ──────────────────────────
+    // ── Auto-detect language ──────────────────────────────────────────────────────
     let detectedLang = "en";
     if (fullMessage.length > 10 && !transcribedVoice) {
         try {
@@ -782,17 +907,21 @@ async function processMessage(
         } catch { /* non-fatal */ }
     }
 
-    // ── Send typing indicator + progress message ─────────────────────────────────
+    // ── Progress message ──────────────────────────────────────────────────────────
     await bot.sendChatAction(chatId, "typing");
     let progressMsg: TelegramMessage | null = null;
     const activeTools: string[] = [];
+    const completedTools: string[] = [];
     let lastEditTs = 0;
 
+    const voicePreamble = transcribedVoice
+        ? `🎙️ <b>Heard:</b> <blockquote>${escapeHtml(fullMessage.slice(0, 200))}${fullMessage.length > 200 ? "…" : ""}</blockquote>`
+        : undefined;
+
     try {
-        progressMsg = await bot.sendMessage(chatId,
-            transcribedVoice
-                ? `🎙️ <b>Heard:</b> <i>"${escapeHtml(fullMessage.slice(0, 150))}..."</i>\n\n⚙️ <b>Processing…</b>`
-                : "⚙️ <b>Processing…</b>",
+        progressMsg = await bot.sendMessage(
+            chatId,
+            buildProgressMessage([], [], voicePreamble ?? undefined),
             { parse_mode: "HTML" }
         );
     } catch { /* non-fatal */ }
@@ -800,53 +929,43 @@ async function processMessage(
     const updateProgressMessage = async (toolName: string, status: "start" | "done" | "error") => {
         if (!progressMsg) return;
         const now = Date.now();
-        if (now - lastEditTs < 1000) return;
+        if (now - lastEditTs < 900) return;
         lastEditTs = now;
 
-        if (status === "start") activeTools.push(toolName);
-        else {
+        if (status === "start") {
+            activeTools.push(toolName);
+        } else {
             const idx = activeTools.lastIndexOf(toolName);
             if (idx !== -1) activeTools.splice(idx, 1);
+            if (!completedTools.includes(toolName)) completedTools.push(toolName);
         }
 
-        const toolIcon = getTelegramToolIcon(toolName);
-        const currentTool = activeTools[activeTools.length - 1];
-        const progressText = currentTool
-            ? `⚙️ <b>Working…</b>\n${toolIcon} <code>${currentTool}</code> ${status === "error" ? "❌" : "running"}`
-            : "⚙️ <b>Finalizing…</b>";
-
+        const msgText = buildProgressMessage(activeTools, completedTools, voicePreamble ?? undefined);
         try {
-            await bot.editMessageText(chatId, progressMsg.message_id, progressText, { parse_mode: "HTML" });
-        } catch { /* ignore */ }
+            await bot.editMessageText(chatId, progressMsg.message_id, msgText, { parse_mode: "HTML" });
+        } catch { /* ignore edit errors */ }
     };
 
     const { runAgent } = await import("./agent");
-
-    // Collect images generated by the agent during this turn
     const generatedImages: Array<{ url: string; description: string; mimeType: string }> = [];
-
-    // Extract any attachments we added to the msg object
     const tgAttachments = (msg as any)._vega_attachment ? [(msg as any)._vega_attachment] : undefined;
 
     let reply: string;
     try {
         reply = await runAgent(env, sessionId, fullMessage, undefined, async (event) => {
-            if (event.type === "tool-start") await updateProgressMessage(event.data.name, "start");
-            else if (event.type === "tool-result" || event.type === "tool-error") {
+            if (event.type === "tool-start") {
+                await updateProgressMessage(event.data.name, "start");
+            } else if (event.type === "tool-result" || event.type === "tool-error") {
                 await updateProgressMessage(event.data.name, event.type === "tool-error" ? "error" : "done");
 
-                // ── Capture generate_image results ──────────────────────────────
                 if (event.type === "tool-result" && event.data.name === "generate_image") {
                     const output = event.data.output as Record<string, unknown>;
-                    if (output?.success && output?.imageUrl && typeof output.imageUrl === "string") {
-                        // Only capture real HTTP URLs (not base64 data URIs)
-                        if (output.imageUrl.startsWith("http")) {
-                            generatedImages.push({
-                                url: output.imageUrl as string,
-                                description: (output.description as string) || "Generated image",
-                                mimeType: (output.mimeType as string) || "image/png",
-                            });
-                        }
+                    if (output?.success && typeof output?.imageUrl === "string" && output.imageUrl.startsWith("http")) {
+                        generatedImages.push({
+                            url: output.imageUrl as string,
+                            description: (output.description as string) || "Generated image",
+                            mimeType: (output.mimeType as string) || "image/png",
+                        });
                     }
                 }
             }
@@ -854,21 +973,30 @@ async function processMessage(
     } catch (err) {
         if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
         await bot.sendMessage(chatId,
-            `❌ <b>Error:</b> ${escapeHtml(String(err))}`,
+            buildErrorMessage(String(err)),
             { parse_mode: "HTML" }
         );
         return;
     }
 
-    // Delete progress message
     if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
 
-    // When we send images as photos, remove image URLs from the text so we don't show links
+    // ── Capture generated image URLs from text ───────────────────────────────────
+    const imageRegex = /https?:\/\/[^\s)]+\/files\/generated\/[^\s)]+\.(?:png|jpg|jpeg)/gi;
+    let imgMatch;
+    while ((imgMatch = imageRegex.exec(reply)) !== null) {
+        const url = imgMatch[0];
+        if (!generatedImages.find(i => i.url === url)) {
+            generatedImages.push({ url, description: "Generated Image", mimeType: url.endsWith(".png") ? "image/png" : "image/jpeg" });
+        }
+    }
+
+    // Strip image URLs from text body so they don't show as raw links
     if (generatedImages.length > 0) {
-        const imageUrls = new Set(generatedImages.map((i) => i.url));
+        const imageUrls = new Set(generatedImages.map(i => i.url));
         reply = reply
             .split("\n")
-            .filter((line) => {
+            .filter(line => {
                 const t = line.trim();
                 if (!t) return true;
                 if (imageUrls.has(t)) return false;
@@ -881,10 +1009,26 @@ async function processMessage(
             .trim();
     }
 
-    // ── Send final reply (as text or voice) ──────────────────────────────────────
-    // 1. Split Markdown into chunks that will likely fit in 4096-char HTML messages
-    const replyChunks = splitMessage(reply, 3800);
+    // ── Detect audio URLs ─────────────────────────────────────────────────────────
+    const audioUrls: string[] = [];
+    const audioRegex = /https?:\/\/[^\s)]+\/files\/voice\/[^\s)]+\.wav/gi;
+    let audioMatch;
+    while ((audioMatch = audioRegex.exec(reply)) !== null) {
+        audioUrls.push(audioMatch[0]);
+    }
+
+    if (audioUrls.length > 0) {
+        for (const url of audioUrls) {
+            const mdRegex = new RegExp(`!\\[[^\\]]*\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "gi");
+            reply = reply.replace(mdRegex, "");
+            reply = reply.replace(url, "");
+        }
+        reply = reply.replace(/\n{3,}/g, "\n\n").trim();
+    }
+
+    // ── Split and send text reply ─────────────────────────────────────────────────
     const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
+    const replyChunks = splitMessageSafe(reply, 3800);
 
     const sendSafeMessage = async (rawText: string, htmlText: string, msgId: number) => {
         try {
@@ -894,7 +1038,7 @@ async function processMessage(
                 disable_web_page_preview: true,
             });
         } catch (e) {
-            console.warn("[Telegram] HTML parsing failed, falling back to plain text:", String(e));
+            console.warn("[Telegram] HTML parse failed, falling back to plain text:", String(e));
             return await bot.sendMessage(chatId, rawText, {
                 reply_to_message_id: msgId,
                 disable_web_page_preview: true,
@@ -904,57 +1048,68 @@ async function processMessage(
 
     for (let i = 0; i < replyChunks.length; i++) {
         const chunk = replyChunks[i];
+        if (!chunk.trim() && i === 0 && replyChunks.length === 1 && audioUrls.length > 0) continue;
+
         const formatted = markdownToHtml(chunk);
 
-        // Only use voice if it's the only chunk and within reasonable length
         if (i === 0 && replyChunks.length === 1 && voiceEnabled && reply.length <= 2000) {
             try {
                 await bot.sendChatAction(chatId, "upload_document");
                 const { generateSpeechBytes } = await import("./tools/voice");
                 const audioBytes = await generateSpeechBytes(reply, env);
 
+                await sendSafeMessage(chunk, formatted, msg.message_id);
                 if (audioBytes) {
-                    await sendSafeMessage(chunk, formatted, msg.message_id);
                     await bot.sendVoice(chatId, audioBytes, {
                         reply_to_message_id: msg.message_id,
-                        caption: "🎙️ Voice reply",
+                        caption: buildVoiceCaption(),
                     });
-                } else {
-                    await sendSafeMessage(chunk, formatted, msg.message_id);
                 }
             } catch (ttsErr) {
-                console.error("[Telegram TTS / Msg] Failed:", ttsErr);
+                console.error("[Telegram TTS] Failed:", ttsErr);
                 await sendSafeMessage(chunk, formatted, msg.message_id);
             }
         } else {
-            // Regular text chunk delivery
             await sendSafeMessage(chunk, formatted, msg.message_id);
         }
     }
 
-    // ── Send generated images as Telegram photos ─────────────────────────────────
+    // ── Send audio attachments (Fetch-then-Push: never pass URL to Telegram directly) ──
+    if (audioUrls.length > 0) {
+        await Promise.all(audioUrls.map(async (audioUrl) => {
+            try {
+                await bot.sendChatAction(chatId, "upload_document");
+                // Fetch the audio bytes from our own R2/Worker endpoint
+                const audioRes = await fetch(audioUrl);
+                if (!audioRes.ok) throw new Error(`Fetch status ${audioRes.status}`);
+                const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
+                await bot.sendVoice(chatId, audioBytes, {
+                    reply_to_message_id: msg.message_id,
+                    caption: buildVoiceCaption(),
+                });
+            } catch (aErr) {
+                console.error("[Telegram Audio] Failed to send voice bytes:", aErr);
+            }
+        }));
+    }
+
+    // ── Send generated images ─────────────────────────────────────────────────────
     if (generatedImages.length > 0) {
-        for (const img of generatedImages) {
+        await Promise.all(generatedImages.map(async (img) => {
             try {
                 await bot.sendChatAction(chatId, "upload_photo");
                 const imgRes = await fetch(img.url);
                 if (!imgRes.ok) throw new Error(`Fetch status ${imgRes.status}`);
-
                 const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
-
-                // Truncate description for caption limit (1024 chars), ensure HTML is safe
-                const rawCaption = img.description.length > 500
-                    ? img.description.slice(0, 497) + "..."
-                    : img.description;
-                const htmlCaption = markdownToHtml(rawCaption);
-
-                await bot.sendPhoto(chatId, imageBytes, htmlCaption);
+                const caption = buildImageCaption(img.description, img.mimeType);
+                await bot.sendPhoto(chatId, imageBytes, caption);
             } catch (imgErr) {
                 console.error("[Telegram Image] Failed to send photo:", imgErr);
             }
-        }
+        }));
     }
 
+    // ── Log activity ──────────────────────────────────────────────────────────────
     const activityKey = config.userId ? `tg:activity:${config.userId}` : "tg:activity";
     try {
         await redis.lpush(activityKey, JSON.stringify({
@@ -971,6 +1126,33 @@ async function processMessage(
     } catch { /* non-fatal */ }
 }
 
+// ─── Caption & Error Builders ─────────────────────────────────────────────────
+
+function buildVoiceCaption(): string {
+    return `🎙️ <b>Voice Reply</b>  ·  <i>Tap to listen</i>`;
+}
+
+/**
+ * Build a beautiful image caption from a description string.
+ * Trims to Telegram's 1024-char caption limit, preserving HTML integrity.
+ */
+function buildImageCaption(description: string, mimeType?: string): string {
+    const ext = mimeType?.split("/")[1]?.toUpperCase() ?? "PNG";
+    const rawDesc = description.length > 700 ? description.slice(0, 697) + "…" : description;
+    const escapedDesc = escapeHtml(rawDesc);
+    return `🎨 <b>Generated Image</b>  ·  <i>${ext}</i>\n\n${escapedDesc}`;
+}
+
+function buildErrorMessage(errText: string): string {
+    return [
+        `❌ <b>Something went wrong</b>`,
+        ``,
+        `<blockquote>${escapeHtml(errText.slice(0, 300))}</blockquote>`,
+        ``,
+        `<i>Please try again or type /reset to start fresh.</i>`,
+    ].join("\n");
+}
+
 // ─── Callback Query Handler ───────────────────────────────────────────────────
 
 async function handleCallbackQuery(
@@ -985,21 +1167,16 @@ async function handleCallbackQuery(
 
 // ─── Setup & Management Functions ────────────────────────────────────────────
 
-/**
- * Generate a deterministic webhook secret from the bot token.
- */
 export async function getTelegramSecret(botToken: string): Promise<string> {
     const secretBytes = await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(`vega-${botToken}`)
     );
     return Array.from(new Uint8Array(secretBytes))
-        .map((b) => b.toString(16).padStart(2, "0"))
+        .map(b => b.toString(16).padStart(2, "0"))
         .join("")
         .slice(0, 64);
 }
-
-// ─── D1 helpers (use src/db/schema.ts + src/db/queries.ts) ─────────────────────
 
 function rowToConfig(row: TelegramConfigRow, userId?: string): TelegramBotConfig {
     const c: TelegramBotConfig = {
@@ -1025,7 +1202,6 @@ export async function ensureTelegramConfigsTable(env: Env): Promise<void> {
     await dbEnsureTable(db);
 }
 
-/** Resolve bot config by webhook secret (for POST /telegram/webhook). Returns null if no D1 or no row. */
 export async function getTelegramConfigBySecret(env: Env, secret: string): Promise<TelegramBotConfig | null> {
     const db = getDb(env);
     if (!db) return null;
@@ -1034,7 +1210,6 @@ export async function getTelegramConfigBySecret(env: Env, secret: string): Promi
     return rowToConfig(row, row.user_id);
 }
 
-/** Get config by user id (for GET /telegram/status, DELETE /telegram/disconnect). */
 export async function getTelegramConfigByUserId(env: Env, userId: string): Promise<TelegramBotConfig | null> {
     const db = getDb(env);
     if (!db) return null;
@@ -1064,7 +1239,6 @@ export async function deleteTelegramConfigByUserId(env: Env, userId: string): Pr
     await dbDeleteByUserId(db, userId);
 }
 
-/** Verify internal secret (Next.js → Worker). */
 export function verifyTelegramInternalSecret(env: Env, header: string | null): boolean {
     const expected = (env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
     if (!expected || !header) return false;
@@ -1074,10 +1248,6 @@ export function verifyTelegramInternalSecret(env: Env, header: string | null): b
     return diff === 0;
 }
 
-/**
- * Register a Telegram bot: validate token, set webhook, store in D1 (if userId + DB) or Redis.
- * Called from POST /telegram/setup
- */
 export async function setupTelegramBot(
     botToken: string,
     workerUrl: string,
@@ -1086,7 +1256,6 @@ export async function setupTelegramBot(
 ): Promise<TelegramBotConfig> {
     const bot = new TelegramBot(botToken);
 
-    // Validate the token by calling getMe
     let me: TelegramUser;
     try {
         me = await bot.getMe();
@@ -1094,10 +1263,7 @@ export async function setupTelegramBot(
         throw new Error("Invalid bot token. Create a bot at https://t.me/BotFather and copy the token.");
     }
 
-    // Generate a webhook secret from the token (deterministic, no extra storage needed)
     const secret = await getTelegramSecret(botToken);
-
-    // Register the webhook with Telegram
     const webhookUrl = `${workerUrl}/telegram/webhook`;
     await bot.setWebhook(webhookUrl, secret);
 
@@ -1120,14 +1286,10 @@ export async function setupTelegramBot(
         return config;
     }
 
-    // Multi-tenant mode requires a userId + D1 binding.
-    console.warn("[Telegram Setup] Missing userId or D1 binding. Per-user setup is required; no config was persisted.");
+    console.warn("[Telegram Setup] Missing userId or D1 binding. No config was persisted.");
     return config;
 }
 
-/**
- * Disconnect the Telegram bot: delete webhook, remove from D1 (if userId + DB) or Redis.
- */
 export async function disconnectTelegramBot(env: Env, userId?: string): Promise<void> {
     const db = (env as { DB?: D1Database }).DB;
 
@@ -1136,8 +1298,8 @@ export async function disconnectTelegramBot(env: Env, userId?: string): Promise<
         if (config) {
             try {
                 const bot = new TelegramBot(config.token);
-                await bot.deleteWebhook().catch((err) => {
-                    console.error("[Telegram Disconnect] Failed to delete webhook from Telegram:", err);
+                await bot.deleteWebhook().catch(err => {
+                    console.error("[Telegram Disconnect] Failed to delete webhook:", err);
                 });
             } catch (_) { /* ignore */ }
             await deleteTelegramConfigByUserId(env, userId);
@@ -1146,31 +1308,16 @@ export async function disconnectTelegramBot(env: Env, userId?: string): Promise<
         return;
     }
 
-    // Legacy global config via Redis has been removed; nothing to do here.
-    console.warn("[Telegram Disconnect] Called without userId/DB. No action taken in multi-tenant mode.");
+    console.warn("[Telegram Disconnect] Called without userId/DB. No action taken.");
 }
 
-/**
- * Legacy helper for a single global bot config.
- * In the new multi-tenant design we no longer load Telegram tokens
- * from Redis or TELEGRAM_BOT_TOKEN — all configs live in D1 per user.
- * This now always returns null but is kept for backwards compatibility.
- */
 export async function getTelegramConfig(_env: Env): Promise<TelegramBotConfig | null> {
     console.warn("[Telegram Config] Legacy global config is disabled. Use per-user D1 configs instead.");
     return null;
 }
 
-/**
- * Verify that a webhook request is authentically from Telegram.
- * Telegram sets X-Telegram-Bot-Api-Secret-Token header.
- */
-export function verifyWebhookSecret(
-    headerSecret: string | null,
-    expectedSecret: string
-): boolean {
+export function verifyWebhookSecret(headerSecret: string | null, expectedSecret: string): boolean {
     if (!headerSecret) return false;
-    // Constant-time comparison to prevent timing attacks
     if (headerSecret.length !== expectedSecret.length) return false;
     let diff = 0;
     for (let i = 0; i < headerSecret.length; i++) {
@@ -1179,116 +1326,263 @@ export function verifyWebhookSecret(
     return diff === 0;
 }
 
-// ─── Formatting Helpers ───────────────────────────────────────────────────────
+// ─── Core HTML Formatter ──────────────────────────────────────────────────────
 
 /**
- * Convert agent's Markdown output to Telegram-safe HTML.
+ * Convert agent Markdown output to Telegram-safe HTML.
  *
- * Telegram HTML supports: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="">
- * Everything else must be escaped.
+ * Supported Telegram HTML tags (as of Bot API 9.x):
+ *   <b> <i> <u> <s> <code> <pre> <a href=""> <tg-spoiler>
+ *   <blockquote> <blockquote expandable>
+ *   <pre><code class="language-*">
+ *
+ * Strategy:
+ *   1. Extract code blocks + inline code → replace with placeholders
+ *   2. Extract blockquotes (> …) → replace with placeholders
+ *   3. Process tables → convert to <pre> monospace grid
+ *   4. Escape all remaining HTML special chars (&, <, >, ")
+ *   5. Apply remaining inline markdown rules
+ *   6. Restore all placeholders
  */
 export function markdownToHtml(text: string): string {
-    const placeholders: Map<string, string> = new Map();
-    let placeholderCounter = 0;
-
-    // 1. Protect Code Blocks (``` ... ```)
-    let result = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
-        const id = `\x00CODE_${placeholderCounter++}\x00`;
-        placeholders.set(id, `<pre><code>${escapeHtml(code.trim())}</code></pre>`);
+    const slots = new Map<string, string>();
+    let n = 0;
+    const slot = (html: string): string => {
+        const id = `\x00SLOT${n++}\x00`;
+        slots.set(id, html);
         return id;
+    };
+    const restore = (s: string): string => {
+        let result = s;
+        // Iterate until fully resolved (handles nested placeholders)
+        let prev = "";
+        while (prev !== result) {
+            prev = result;
+            slots.forEach((html, id) => { result = result.split(id).join(html); });
+        }
+        return result;
+    };
+
+    let r = text;
+
+    // ── 1. Fenced code blocks: ```lang\ncode``` ───────────────────────────────
+    r = r.replace(/```(\w*)\r?\n?([\s\S]*?)```/g, (_, lang, code) => {
+        const trimmed = code.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+        const escaped = escapeHtml(trimmed);
+        const normalized = lang.toLowerCase().trim();
+
+        // Map common aliases to Telegram-supported language identifiers
+        const langMap: Record<string, string> = {
+            js: "javascript", ts: "typescript", py: "python",
+            sh: "bash", shell: "bash", zsh: "bash",
+            yml: "yaml", rb: "ruby", rs: "rust",
+            cs: "csharp", "c#": "csharp", kt: "kotlin",
+            md: "markdown", dockerfile: "docker",
+        };
+        const langClass = normalized ? (langMap[normalized] ?? normalized) : "";
+
+        const inner = langClass
+            ? `<code class="language-${langClass}">${escaped}</code>`
+            : escaped;
+        return slot(`<pre>${inner}</pre>`);
     });
 
-    // 2. Protect Inline Code (`code`) — exclude already replaced blocks
-    result = result.replace(/`([^`\n]+)`/g, (_, code) => {
-        const id = `\x00CODE_${placeholderCounter++}\x00`;
-        placeholders.set(id, `<code>${escapeHtml(code)}</code>`);
-        return id;
+    // ── 2. Inline code: `code` ────────────────────────────────────────────────
+    r = r.replace(/`([^`\n]+?)`/g, (_, code) => slot(`<code>${escapeHtml(code)}</code>`));
+
+    // ── 3. Markdown tables → monospace <pre> ──────────────────────────────────
+    r = r.replace(/((?:^[^\n]*\|[^\n]*\n)+)/gm, (tableBlock) => {
+        const lines = tableBlock.trim().split("\n");
+        const isSeparator = (l: string) => /^[\s|:\-]+$/.test(l);
+        const rows = lines.filter(l => !isSeparator(l));
+        const cells = rows.map(l =>
+            l.split("|").map(c => c.trim()).filter((c, i, a) => !(i === 0 && c === "") && !(i === a.length - 1 && c === ""))
+        );
+        if (cells.length === 0) return tableBlock;
+        const colWidths = cells[0].map((_, ci) =>
+            Math.max(...cells.map(row => (row[ci] ?? "").length))
+        );
+        const formatted = cells.map((row, ri) => {
+            const line = row.map((cell, ci) => cell.padEnd(colWidths[ci] ?? 0)).join("  │  ");
+            const divider = ri === 0 ? "\n" + colWidths.map(w => "─".repeat(w)).join("──┼──") : "";
+            return line + divider;
+        }).join("\n");
+        return slot(`<pre>${escapeHtml(formatted)}</pre>`);
     });
 
-    // 3. Escape raw HTML special chars in the remaining prose
-    result = escapeHtml(result);
+    // ── 4. Blockquotes (> …) ─────────────────────────────────────────────────
+    // Collapse consecutive > lines into one blockquote block
+    r = r.replace(/((?:^>[ \t]?.+\n?)+)/gm, (block) => {
+        const inner = block
+            .split("\n")
+            .map(l => l.replace(/^>[ \t]?/, "").trim())
+            .filter(Boolean)
+            .join("\n");
+        // Use expandable for long quotes (> 3 lines), plain for short
+        const lineCount = inner.split("\n").length;
+        const tag = lineCount > 3 ? "blockquote expandable" : "blockquote";
+        // We escape AFTER processing inline markdown, so use a two-step approach:
+        // For now store raw text; we'll apply inline formatting inside the restore pass
+        return slot(`<${tag}>${escapeHtml(inner)}</${tag.split(" ")[0]}>`);
+    });
 
-    // 4. Apply non-code Markdown rules to the escaped prose
-    // Headers (h1–h3 → bold line)
-    result = result.replace(/^#{1,3}\s+(.+)$/gm, "<b>$1</b>");
+    // ── 5. Escape remaining prose ─────────────────────────────────────────────
+    r = escapeHtml(r);
+
+    // ── 6. Apply inline Markdown rules ───────────────────────────────────────
+
+    // H1 → underlined bold with separator
+    r = r.replace(/^#{1}\s+(.+)$/gm, (_, t) => `\n<b><u>${t}</u></b>\n`);
+    // H2 → bold
+    r = r.replace(/^#{2}\s+(.+)$/gm, (_, t) => `\n<b>${t}</b>\n`);
+    // H3 → bold italic
+    r = r.replace(/^#{3}\s+(.+)$/gm, (_, t) => `<b><i>${t}</i></b>`);
+    // H4–H6 → italic
+    r = r.replace(/^#{4,6}\s+(.+)$/gm, (_, t) => `<i>${t}</i>`);
+
+    // Bold + Italic: ***text*** or ___text___
+    r = r.replace(/\*{3}(.+?)\*{3}/gs, "<b><i>$1</i></b>");
+    r = r.replace(/_{3}(.+?)_{3}/gs, "<b><i>$1</i></b>");
 
     // Bold: **text** or __text__
-    result = result.replace(/\*\*(.+?)\*\*/gs, "<b>$1</b>");
-    result = result.replace(/__(.+?)__/gs, "<b>$1</b>");
+    r = r.replace(/\*{2}(.+?)\*{2}/gs, "<b>$1</b>");
+    r = r.replace(/_{2}(.+?)_{2}/gs, "<b>$1</b>");
 
-    // Italic: *text* or _text_ (single)
-    // We use more restrictive regex to avoid matching across multiple lines unnecessarily
-    result = result.replace(/(?<!\*)\*(?!\*)([^\*\n]+?)(?<!\*)\*(?!\*)/g, "<i>$1</i>");
-    result = result.replace(/(?<!_)_(?!_)([^_\n]+?)(?<!_)_(?!_)/g, "<i>$1</i>");
+    // Italic: *text* or _text_ (single, non-greedy, no leading/trailing spaces)
+    r = r.replace(/(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)/g, "<i>$1</i>");
+    r = r.replace(/(?<!_)_(?!\s)([^_\n]+?)(?<!\s)_(?!_)/g, "<i>$1</i>");
+
+    // Underline: ++text++ (non-standard but common in agents)
+    r = r.replace(/\+{2}(.+?)\+{2}/g, "<u>$1</u>");
 
     // Strikethrough: ~~text~~
-    result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
+    r = r.replace(/~{2}(.+?)~{2}/g, "<s>$1</s>");
+
+    // Spoiler: ||text|| (Discord-style, we map to tg-spoiler)
+    r = r.replace(/\|{2}(.+?)\|{2}/g, "<tg-spoiler>$1</tg-spoiler>");
 
     // Links: [text](url)
-    result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-
-    // Horizontal rules
-    result = result.replace(/^[-*_]{3,}$/gm, "─────────────");
-
-    // Bullet lists
-    result = result.replace(/^[\-\*\+]\s+(.+)$/gm, "• $1");
-
-    // Blockquotes
-    result = result.replace(/^>\s*(.+)$/gm, "<i>│ $1</i>");
-
-    // 5. Restore code segments from placeholders
-    placeholders.forEach((html, id) => {
-        result = result.replace(id, html);
+    r = r.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+        const safeUrl = url.replace(/"/g, "&quot;");
+        return `<a href="${safeUrl}">${text}</a>`;
     });
 
-    return result.trim();
+    // Auto-link bare URLs not already wrapped in a tag
+    r = r.replace(/(?<![">])(https?:\/\/[^\s<>"]+)/g, (_, url) => {
+        const clean = url.replace(/[.,;:!?]+$/, ""); // strip trailing punctuation
+        const trail = url.slice(clean.length);
+        return `<a href="${clean.replace(/"/g, "&quot;")}">${clean}</a>${trail}`;
+    });
+
+    // Numbered lists: "1. item" → formatted line
+    r = r.replace(/^(\d+)\.\s+(.+)$/gm, (_, num, item) => `${num}. ${item}`);
+
+    // Bullet lists: "- item" or "* item" or "+ item"
+    r = r.replace(/^[\-\*\+]\s+(.+)$/gm, "•  $1");
+
+    // Task lists: "- [x] done" / "- [ ] todo"
+    r = r.replace(/^•\s+\[x\]\s+(.+)$/gim, "☑  <s>$1</s>");
+    r = r.replace(/^•\s+\[\s\]\s+(.+)$/gm, "☐  $1");
+
+    // Horizontal rules: ---, ***, ___
+    r = r.replace(/^[-*_]{3,}$/gm, "──────────────────────");
+
+    // Clean up excessive blank lines (max 2 consecutive)
+    r = r.replace(/\n{3,}/g, "\n\n");
+
+    // ── 7. Restore all slots ──────────────────────────────────────────────────
+    r = restore(r);
+
+    return r.trim();
 }
 
 /**
- * Escape a string for safe use inside HTML.
+ * Escape a string for safe embedding inside Telegram HTML.
+ * Only escapes the three characters that matter: &, <, >
+ * (We also escape " for attribute safety.)
  */
 export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&" + "amp;")
-    .replace(/</g, "&" + "lt;")
-    .replace(/>/g, "&" + "gt;")
-    .replace(/"/g, "&" + "quot;");
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
 
+// ─── HTML-Aware Message Splitter ──────────────────────────────────────────────
+
 /**
- * Split a message into chunks at paragraph or newline boundaries, respecting max length.
- * Attempt to be extremely conservative to avoid splitting in the middle of a tag.
+ * Split a long HTML-formatted message into chunks ≤ maxLen chars without
+ * breaking inside <pre> blocks, <code> blocks, HTML tags, or mid-word.
+ *
+ * Algorithm:
+ *   1. Walk through the text tracking open/close tag depth
+ *   2. Never split while inside a <pre> or <code> block
+ *   3. Prefer double-newline splits, then single-newline, then space
+ *   4. Carry the current "open tags" context into the next chunk header
+ *      (so each chunk is independently valid HTML)
  */
-function splitMessage(text: string, maxLen: number): string[] {
+export function splitMessageSafe(text: string, maxLen: number): string[] {
     if (text.length <= maxLen) return [text];
 
     const chunks: string[] = [];
-    let remaining = text;
+    let pos = 0;
+    const len = text.length;
 
-    while (remaining.length > 0) {
-        if (remaining.length <= maxLen) {
-            chunks.push(remaining);
+    while (pos < len) {
+        if (len - pos <= maxLen) {
+            const tail = text.slice(pos).trim();
+            if (tail) chunks.push(tail);
             break;
         }
 
-        // Try to find a good break point: double newline, then single newline, then space
-        let splitIdx = remaining.lastIndexOf("\n\n", maxLen);
-        if (splitIdx === -1) splitIdx = remaining.lastIndexOf("\n", maxLen);
-        if (splitIdx === -1) splitIdx = remaining.lastIndexOf(" ", maxLen);
+        // Find the safe window end
+        const windowEnd = pos + maxLen;
 
-        // If no good break point found, hard split at maxLen
-        if (splitIdx === -1) splitIdx = maxLen;
+        // Don't split inside a <pre> block — scan forward to find its end
+        const preStart = text.indexOf("<pre>", pos);
+        if (preStart !== -1 && preStart < windowEnd) {
+            const preEnd = text.indexOf("</pre>", preStart + 5);
+            if (preEnd !== -1 && preEnd + 6 > windowEnd) {
+                // The <pre> block straddles our cut point — push out to after it
+                const chunkEnd = preEnd + 6;
+                chunks.push(text.slice(pos, chunkEnd).trim());
+                pos = chunkEnd;
+                // Skip leading whitespace
+                while (pos < len && (text[pos] === "\n" || text[pos] === " ")) pos++;
+                continue;
+            }
+        }
 
-        chunks.push(remaining.slice(0, splitIdx).trim());
-        remaining = remaining.slice(splitIdx).trim();
+        // Find best split: prefer \n\n, then \n, then space
+        let splitIdx = -1;
+        for (const sep of ["\n\n", "\n", " "]) {
+            const idx = text.lastIndexOf(sep, windowEnd);
+            if (idx > pos + maxLen * 0.5) { // Don't split too early
+                splitIdx = idx + sep.length;
+                break;
+            }
+        }
+        if (splitIdx === -1 || splitIdx <= pos) splitIdx = windowEnd;
+
+        // Ensure we don't split inside an HTML tag
+        const tagOpen = text.lastIndexOf("<", splitIdx);
+        const tagClose = text.indexOf(">", tagOpen);
+        if (tagOpen !== -1 && tagOpen > pos && tagClose >= splitIdx) {
+            splitIdx = tagOpen;
+        }
+
+        const chunk = text.slice(pos, splitIdx).trim();
+        if (chunk) chunks.push(chunk);
+        pos = splitIdx;
+        while (pos < len && (text[pos] === "\n" || text[pos] === " ")) pos++;
     }
 
-    return chunks.filter((c) => c.length > 0);
+    return chunks.filter(c => c.length > 0);
 }
 
-/**
- * Format a Unix timestamp as a relative time string.
- */
+// ─── Utility Helpers ─────────────────────────────────────────────────────────
+
 function formatRelativeTime(ts: number): string {
     const diff = Date.now() - ts;
     if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
@@ -1298,7 +1592,38 @@ function formatRelativeTime(ts: number): string {
 }
 
 /**
- * Get a simple emoji icon for a tool name (shown in Telegram progress messages).
+ * Return the category name for a tool, shown in the progress message.
+ */
+function getToolCategory(toolName: string): string {
+    const categories: Record<string, string> = {
+        web_search: "Searching the web",
+        browse_web: "Browsing a page",
+        fetch_url: "Fetching URL",
+        firecrawl: "Deep scraping",
+        store_memory: "Saving to memory",
+        recall_memory: "Recalling memories",
+        semantic_store: "Storing vector",
+        semantic_recall: "Vector search",
+        run_code: "Executing code",
+        generate_image: "Generating image",
+        text_to_speech: "Synthesizing voice",
+        speech_to_text: "Transcribing audio",
+        market_data: "Fetching market data",
+        translate: "Translating",
+        manage_goals: "Managing goals",
+        spawn_agent: "Spawning agent",
+        create_tool: "Building new tool",
+        schedule_cron: "Scheduling job",
+        write_file: "Writing file",
+        read_file: "Reading file",
+        send_email: "Sending email",
+        github: "GitHub action",
+    };
+    return categories[toolName] ?? "Processing";
+}
+
+/**
+ * Return an emoji icon for a tool name shown in progress messages.
  */
 function getTelegramToolIcon(toolName: string): string {
     const icons: Record<string, string> = {

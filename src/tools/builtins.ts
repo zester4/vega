@@ -657,13 +657,16 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "text_to_speech",
     description:
-      "Convert text to lifelike speech using Gemini 2.5 Flash TTS. Generates high-quality WAV audio stored in R2. Supports controllable style, accent, and pace through natural language prompts. Perfect for voice messages, narrations, and Telegram replies.",
+      "Convert text to lifelike speech using Gemini 2.5 Flash TTS. Generates high-quality WAV audio stored in R2. Supports 90+ languages with automatic detection. Supports single-speaker or MULTI-SPEAKER (podcast style) audio. Use natural language 'directorsNotes' to control style, accent, and pace. For multi-speaker, format text as 'SpeakerName: message' and provide the speakers array.",
     parameters: {
       properties: {
-        text: { type: "string", description: "Text to convert to speech. You can include performance notes like 'Say cheerfully: Hello!' or 'Speak slowly: Welcome'." },
+        text: {
+          type: "string",
+          description: "Text to convert. For multi-speaker, use 'Speaker: text' format. Gemini limit is 32k tokens."
+        },
         voiceName: {
           type: "string",
-          description: "Gemini voice to use. Default: Puck.",
+          description: "Gemini voice to use for single-speaker mode. Default: Puck.",
           enum: [
             "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
             "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
@@ -672,6 +675,22 @@ export const BUILTIN_DECLARATIONS = [
             "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
           ]
         },
+        speakers: {
+          type: "array",
+          description: "Optional: Define up to 2 speakers for podcast-style audio. Each object needs { speaker: string, voiceName: string }.",
+          items: {
+            type: "object",
+            properties: {
+              speaker: { type: "string", description: "Name used in the transcript (e.g. 'Joe')" },
+              voiceName: { type: "string", description: "Prebuilt voice name for this speaker" }
+            },
+            required: ["speaker", "voiceName"]
+          }
+        },
+        directorsNotes: {
+          type: "string",
+          description: "Optional: High-level performance guidance. e.g. 'Style: energetic, Accent: British, Pacing: fast'."
+        }
       },
       required: ["text"],
     },
@@ -1928,6 +1947,9 @@ async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string
   const agentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const effectiveMemoryPrefix = memoryPrefix ?? agentId;
 
+  const redis = await getRedisClient(env);
+  const userId = callerSessionId ? await redis.get<string>(`session:user-map:${callerSessionId}`) : null;
+
   const agentConfig = {
     name: agentName,
     allowedTools: allowedTools ? allowedTools.split(",").map((t: string) => t.trim()) : null,
@@ -1936,6 +1958,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string
     spawnedAt: new Date().toISOString(),
     parentAgent: "vega-core",
     parentSessionId: callerSessionId ?? null,
+    userId: userId ?? null, // Propagation for Telegram routing
   };
 
   const payload = {
@@ -1948,7 +1971,6 @@ async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string
   };
 
   // Track spawned agent in Redis
-  const redis = await getRedisClient(env);
   const agentRecord = {
     agentId,
     agentName,

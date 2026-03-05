@@ -32,6 +32,17 @@
 import { think } from "../gemini";
 import { getRedis, createTask, updateTask, getTask } from "../memory";
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Redis TTL for workflow state. 7 days covers long-sleeping monitoring workflows. */
+const STATE_TTL_SEC = 60 * 60 * 24 * 7;
+
+/** Task record TTL. Re-extended on every step so long workflows keep their status. */
+const TASK_TTL_SEC = 60 * 60 * 24 * 30; // 30 days
+
+const DEFAULT_MAX_ITERATIONS = 50;
+const HARD_MAX_ITERATIONS = 200;
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type AgentConfig = {
@@ -42,11 +53,30 @@ export type AgentConfig = {
   spawnedAt: string;
   parentAgent: string;
   /**
-   * NEW: The sessionId of the conversation that spawned this agent.
+   * The sessionId of the conversation that spawned this agent.
    * Used to push the result back to the user when the agent completes.
    * Format: "user-{userId}" matching the /chat proxy injection.
    */
   parentSessionId: string | null;
+  /**
+   * Explicit userId extracted from parentSessionId at spawn time.
+   * Avoids fragile string parsing inside completion callbacks.
+   */
+  userId?: string | null;
+  /**
+   * Max agentic iterations for sub_agent workflows.
+   * Default: 50. Hard cap: 200.
+   * Each iteration is a separate CF Worker invocation with a fresh 30 s CPU budget.
+   * 200 iterations = 200 × 30 s of available CPU time on the free plan.
+   */
+  maxIterations?: number;
+  /**
+   * Seconds to sleep between agentic iterations via context.sleep().
+   * 0 / undefined = run as fast as possible (default).
+   * Example: sleepBetweenStepsSec: 3600 = monitor checks every hour.
+   * During sleep ZERO CPU is held — the CF Worker exits and QStash wakes it.
+   */
+  sleepBetweenStepsSec?: number;
 };
 
 export type WorkflowPayload = {
@@ -56,13 +86,37 @@ export type WorkflowPayload = {
   instructions: string;
   steps?: string[];
   agentConfig?: AgentConfig | null;
+  /** Max iterations forwarded for non-sub_agent handlers. */
+  maxIterations?: number;
 };
 
 type WorkflowContext = {
   requestPayload: WorkflowPayload;
   env: unknown;
   run: <T>(id: string, fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Pause the workflow for `seconds` seconds.
+   * The CF Worker exits entirely during sleep — ZERO CPU held.
+   * QStash re-invokes the workflow when the timer expires.
+   */
+  sleep: (stepId: string, seconds: number) => Promise<void>;
 };
+
+// ─── WorkflowAbort guard ──────────────────────────────────────────────────────
+/**
+ * Returns true when `err` is the Upstash WorkflowAbort signal.
+ * This is NORMAL control flow — Upstash throws it after every completed step
+ * to stop the current CF invocation and let QStash orchestrate the next one.
+ * It MUST be re-thrown immediately — never swallowed by any catch block.
+ */
+function isWorkflowAbort(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (
+    err.message?.includes("WorkflowAbort") ||
+    err.constructor?.name === "WorkflowAbort" ||
+    err.message?.includes("Aborting workflow after executing step")
+  );
+}
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
@@ -72,13 +126,19 @@ export async function workflowHandler(context: WorkflowContext): Promise<void> {
   const redis = getRedis(env);
 
   // ── Step 0: Initialize task record ───────────────────────────────────────────
+  // Upstash caches completed step results — this runs exactly once even on replay.
   await context.run("init", async () => {
-    await createTask(redis, {
-      id: taskId,
-      type: taskType,
-      payload: { instructions, agentConfig },
-      status: "running",
-    });
+    try {
+      await createTask(redis, {
+        id: taskId,
+        type: taskType,
+        payload: { instructions, agentConfig },
+        status: "running",
+      });
+    } catch {
+      // Task may already exist (created by spawn_agent before workflow queued) — just mark running
+      await updateTask(redis, taskId, { status: "running" }).catch(() => { });
+    }
     console.log(`[Workflow] ${taskId} started — type: ${taskType}, agent: ${agentConfig?.name ?? "system"}`);
     return { started: true, taskId, taskType };
   });
@@ -91,7 +151,7 @@ export async function workflowHandler(context: WorkflowContext): Promise<void> {
     } else if (taskType === "research") {
       await handleResearch(context, env, redis, taskId, instructions, steps);
     } else if (taskType === "monitor") {
-      await handleMonitor(context, env, redis, taskId, instructions);
+      await handleMonitor(context, env, redis, taskId, instructions, agentConfig);
     } else if (taskType === "batch") {
       await handleBatch(context, env, redis, taskId, instructions, steps);
     } else {
@@ -99,17 +159,10 @@ export async function workflowHandler(context: WorkflowContext): Promise<void> {
       await handlePlanExecute(context, env, redis, taskId, taskType, instructions, steps);
     }
   } catch (err) {
-    // WorkflowAbort is thrown by Upstash after every completed step — it is
-    // NORMAL control flow, not an error. Re-throw immediately so QStash can
-    // orchestrate the next step. Never mark the task as failed for this.
-    if (
-      err instanceof Error &&
-      (err.message?.includes("WorkflowAbort") ||
-        err.constructor?.name === "WorkflowAbort" ||
-        err.message?.includes("Aborting workflow after executing step"))
-    ) {
-      throw err;
-    }
+    // WorkflowAbort is NORMAL Upstash control flow — thrown after every completed step.
+    // Re-throw immediately so QStash can orchestrate the next step.
+    // NEVER mark the task as failed for this.
+    if (isWorkflowAbort(err)) throw err;
 
     // Genuine fatal error — mark task and re-throw for QStash retry
     console.error(`[Workflow] ${taskId} fatal error:`, String(err));
@@ -151,6 +204,8 @@ type WfState = {
   systemPrompt: string;
   done: boolean;
   finalText: string | null;
+  /** Last completed iteration index — persisted so wf-finalize can read it on replay. */
+  iteration: number;
 };
 
 async function handleSubAgent(
@@ -161,10 +216,14 @@ async function handleSubAgent(
   instructions: string,
   agentConfig: AgentConfig
 ): Promise<void> {
-  console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) starting multi-step execution`);
-
-  const MAX_ITERATIONS = 12;
+  const MAX_ITERATIONS = Math.min(
+    agentConfig.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+    HARD_MAX_ITERATIONS
+  );
+  const SLEEP_SEC = Math.max(0, agentConfig.sleepBetweenStepsSec ?? 0);
   const stateKey = `agent:wf-state:${taskId}`;
+
+  console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) — max: ${MAX_ITERATIONS} iters, sleep: ${SLEEP_SEC}s between steps`);
 
   // ── Step 0: Initialise conversation state in Redis ──────────────────────────
   await context.run("wf-init", async () => {
@@ -183,8 +242,8 @@ async function handleSubAgent(
       { role: "user", parts: [{ text: instructions }] },
     ];
 
-    const state: WfState = { contents, systemPrompt, done: false, finalText: null };
-    await redis.set(stateKey, JSON.stringify(state), { ex: 7200 }); // 2h TTL
+    const state: WfState = { contents, systemPrompt, done: false, finalText: null, iteration: -1 };
+    await redis.set(stateKey, JSON.stringify(state), { ex: STATE_TTL_SEC }); // 7-day TTL — covers long-sleeping workflows
     console.log(`[SubAgent WF] ${taskId} state initialised — ${contents.length} content items`);
     return { ok: true };
   });
@@ -246,7 +305,8 @@ async function handleSubAgent(
       if (functionCalls.length === 0) {
         state.done = true;
         state.finalText = text;
-        await redis.set(stateKey, JSON.stringify(state), { ex: 7200 });
+        state.iteration = i;
+        await redis.set(stateKey, JSON.stringify(state), { ex: STATE_TTL_SEC });
         return { done: true, text, toolsCalled: [] as string[] };
       }
 
@@ -261,6 +321,8 @@ async function handleSubAgent(
             const result = await executeTool(fc.name, fc.args, env, `agent-${taskId}`);
             return { name: fc.name, result };
           } catch (e) {
+            // WorkflowAbort MUST propagate — never swallow it
+            if (isWorkflowAbort(e)) throw e;
             return { name: fc.name, result: { error: String(e) } };
           }
         })
@@ -275,8 +337,9 @@ async function handleSubAgent(
       }));
       state.contents.push({ role: "user", parts: responseParts });
 
-      // Persist updated state for next step
-      await redis.set(stateKey, JSON.stringify(state), { ex: 7200 });
+      // Persist updated state for next step — refresh TTL so long workflows stay alive
+      state.iteration = i;
+      await redis.set(stateKey, JSON.stringify(state), { ex: STATE_TTL_SEC });
 
       return {
         done: false,
@@ -285,34 +348,46 @@ async function handleSubAgent(
       };
     });
 
-    // Update progress visible to get_agent_result
+    // Update progress + re-extend task TTL on every iteration
     await updateTask(redis, taskId, {
+      status: "running",
       result: {
-        completedSteps: i + 1,
-        totalSteps: MAX_ITERATIONS,
-        latestResult: stepResult.toolsCalled?.length
+        completedIterations: i + 1,
+        maxIterations: MAX_ITERATIONS,
+        latestAction: stepResult.toolsCalled?.length
           ? `Called: ${stepResult.toolsCalled.join(", ")}`
           : (stepResult.text?.slice(0, 300) ?? "Working..."),
+        ...(SLEEP_SEC > 0 ? { sleepBetweenStepsSec: SLEEP_SEC } : {}),
       },
-    }).catch(() => { });
+    })
+      .then(() => redis.expire(`agent:task:${taskId}`, TASK_TTL_SEC))
+      .catch(() => { });
 
     if (stepResult.done) {
       finalText = stepResult.text ?? "";
       break;
     }
+
+    // Sleep between iterations — CF Worker exits entirely, ZERO CPU held during wait
+    if (SLEEP_SEC > 0 && i < MAX_ITERATIONS - 1) {
+      await context.sleep(`wf-sleep-${i}`, SLEEP_SEC);
+    }
   }
 
   // ── Finalise: write results, push back to parent user ──────────────────────
   await context.run("wf-finalize", async () => {
-    let result = finalText;
+    // BUG FIX: read finalText from Redis state, NOT the local variable.
+    // On QStash replay, local variables reset to "" — only Redis state survives.
+    const stateRaw = await redis.get<WfState | string>(stateKey);
+    const parsedState = stateRaw
+      ? (typeof stateRaw === "string" ? JSON.parse(stateRaw) : stateRaw) as WfState
+      : null;
 
-    // If no text emerged (loop exhausted without clean termination), synthesise
+    let result = parsedState?.finalText ?? finalText;
+
+    // If loop exhausted without clean termination, synthesise a summary
     if (!result) {
       const { think } = await import("../gemini");
-      const stateRaw = await redis.get<WfState | string>(stateKey);
-      const parsedState = stateRaw
-        ? (typeof stateRaw === "string" ? JSON.parse(stateRaw) : stateRaw) as WfState
-        : null;
       const sysPrompt = parsedState?.systemPrompt ?? "You are a helpful assistant.";
       result = await think(
         env.GEMINI_API_KEY,
@@ -330,6 +405,7 @@ async function handleSubAgent(
         summary: result,
         agent: agentConfig.name,
         memoryPrefix: agentConfig.memoryPrefix,
+        iterationsUsed: parsedState?.iteration ?? "?",
         completedAt,
       },
     });
@@ -340,9 +416,10 @@ async function handleSubAgent(
       const sharedRedis = Redis.fromEnv(env);
       await sharedRedis.set(
         `agent:shared:${agentConfig.memoryPrefix}:result`,
-        JSON.stringify({ summary: result, completedAt })
+        JSON.stringify({ summary: result, completedAt }),
+        { ex: STATE_TTL_SEC }
       );
-      await sharedRedis.set(`agent:shared:${agentConfig.memoryPrefix}:status`, "done");
+      await sharedRedis.set(`agent:shared:${agentConfig.memoryPrefix}:status`, "done", { ex: STATE_TTL_SEC });
     } catch (e) {
       console.warn(`[SubAgent WF] Shared memory write failed: ${String(e)}`);
     }
@@ -371,6 +448,7 @@ async function handleSubAgent(
       taskId,
       agentName: agentConfig.name,
       parentSessionId: agentConfig.parentSessionId,
+      userId: agentConfig.userId ?? null,
       memoryPrefix: agentConfig.memoryPrefix,
       status: "done",
       result,
@@ -392,6 +470,7 @@ export async function fireCompletionCallback(
     taskId: string;
     agentName: string;
     parentSessionId: string | null;
+    userId?: string | null;
     memoryPrefix: string;
     status: string;
     result: string;
@@ -546,7 +625,14 @@ ${findings.join("\n\n")}`,
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MONITOR HANDLER
-// Watch a resource for changes and alert
+// Watch a resource for changes and alert — supports multi-check loops with sleep
+//
+// With agentConfig.sleepBetweenStepsSec set (e.g. 3600 for hourly checks), this
+// workflow runs for days / weeks on the FREE Cloudflare plan. Zero CPU is held
+// during each context.sleep() — the CF Worker exits and QStash wakes it later.
+//
+// The monitor runs agentConfig.maxIterations checks total (default 50).
+// Example: maxIterations: 72, sleepBetweenStepsSec: 3600 = monitors for 3 days.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function handleMonitor(
@@ -554,36 +640,107 @@ async function handleMonitor(
   env: Env,
   redis: ReturnType<typeof getRedis>,
   taskId: string,
-  instructions: string
+  instructions: string,
+  agentConfig?: AgentConfig | null
 ): Promise<void> {
-  await context.run("monitor-execute", async () => {
-    const { runAgent } = await import("../agent");
+  const MAX_CHECKS = Math.min(agentConfig?.maxIterations ?? DEFAULT_MAX_ITERATIONS, HARD_MAX_ITERATIONS);
+  const SLEEP_SEC = Math.max(0, agentConfig?.sleepBetweenStepsSec ?? 0);
 
-    const monitorPrompt = `You are a monitoring agent. Execute this monitoring task ONCE and report findings.
+  console.log(`[Monitor] ${taskId} — ${MAX_CHECKS} checks, ${SLEEP_SEC}s between checks`);
+
+  for (let i = 0; i < MAX_CHECKS; i++) {
+    const checkResult: string = await context.run(`monitor-check-${i}`, async () => {
+      const { runAgent } = await import("../agent");
+
+      const monitorPrompt = `You are a monitoring agent. This is check #${i + 1} of ${MAX_CHECKS}.
 
 Monitoring task: ${instructions}
 
 Steps to follow:
 1. Fetch/search the target resource
-2. Compare with any previously stored state (use recall_memory)
+2. Compare with any previously stored state (use recall_memory key: "monitor-${taskId}-state")
 3. If something changed or matches the alert condition, document it clearly
-4. Store the new state using store_memory so you can compare next time
+4. Store the new state using store_memory (key: "monitor-${taskId}-state") so you can compare next time
 5. Return a clear monitoring report
 
 Be specific about: what you found, whether it changed, and what action (if any) should be taken.`;
 
-    const report = await runAgent(env, `monitor-${taskId}`, monitorPrompt);
+      return runAgent(env, `monitor-${taskId}-check${i}`, monitorPrompt);
+    }).catch((e) => {
+      if (isWorkflowAbort(e)) throw e;
+      return `Check ${i + 1} failed: ${String(e)}`;
+    });
+
+    // Update progress + re-extend task TTL
+    await updateTask(redis, taskId, {
+      status: "running",
+      result: {
+        completedChecks: i + 1,
+        maxChecks: MAX_CHECKS,
+        latestCheck: checkResult.slice(0, 500),
+        checkedAt: new Date().toISOString(),
+        ...(SLEEP_SEC > 0 ? { nextCheckInSec: SLEEP_SEC } : {}),
+      },
+    })
+      .then(() => redis.expire(`agent:task:${taskId}`, TASK_TTL_SEC))
+      .catch(() => { });
+
+    // Proactively alert parent if agent found something significant
+    const needsAlert = /alert|changed|detected|found|triggered/i.test(checkResult);
+    if (needsAlert && agentConfig?.parentSessionId) {
+      await fireCompletionCallback(env, {
+        taskId: `${taskId}-alert-${i}`,
+        agentName: agentConfig.name,
+        parentSessionId: agentConfig.parentSessionId,
+        userId: agentConfig.userId ?? null,
+        memoryPrefix: agentConfig.memoryPrefix,
+        status: "done",
+        result: `🔔 Monitor Alert (check ${i + 1}/${MAX_CHECKS}):
+
+${checkResult}`,
+        completedAt: new Date().toISOString(),
+      }).catch(() => { });
+    }
+
+    // Sleep between checks — CF Worker exits entirely, ZERO CPU held during wait
+    if (SLEEP_SEC > 0 && i < MAX_CHECKS - 1) {
+      await context.sleep(`monitor-sleep-${i}`, SLEEP_SEC);
+    }
+  }
+
+  // Finalize
+  await context.run("monitor-finalize", async () => {
+    const durationLabel = SLEEP_SEC > 0
+      ? `${Math.round(MAX_CHECKS * SLEEP_SEC / 3600 * 10) / 10} hours`
+      : "continuous execution";
+
+    const summary = `Monitoring completed: ${MAX_CHECKS} checks over ${durationLabel}.
+Task: ${instructions}`;
 
     await updateTask(redis, taskId, {
       status: "done",
       result: {
-        report,
-        checkedAt: new Date().toISOString(),
+        summary,
+        totalChecks: MAX_CHECKS,
         completedAt: new Date().toISOString(),
       },
-    });
+    }).catch(() => { });
 
-    console.log(`[Monitor] ${taskId} check complete.`);
+    // Final notification to parent
+    if (agentConfig?.parentSessionId) {
+      await fireCompletionCallback(env, {
+        taskId,
+        agentName: agentConfig.name,
+        parentSessionId: agentConfig.parentSessionId,
+        userId: agentConfig.userId ?? null,
+        memoryPrefix: agentConfig.memoryPrefix,
+        status: "done",
+        result: summary,
+        completedAt: new Date().toISOString(),
+      }).catch(() => { });
+    }
+
+    console.log(`[Monitor] ${taskId} all checks complete.`);
     return { done: true };
   });
 }
@@ -676,22 +833,27 @@ Task: ${instructions}`,
     }
   });
 
-  console.log(`[Workflow] ${taskId} (${taskType}): ${plan.length} steps`);
+  const MAX_STEPS = Math.min(
+    Number(context.requestPayload?.maxIterations ?? DEFAULT_MAX_ITERATIONS),
+    HARD_MAX_ITERATIONS
+  );
+  const effectivePlan = plan.slice(0, MAX_STEPS);
+  console.log(`[Workflow] ${taskId} (${taskType}): ${effectivePlan.length} steps (cap: ${MAX_STEPS})`);
 
   // Execute steps
   const results: string[] = [];
 
-  for (let i = 0; i < plan.length; i++) {
+  for (let i = 0; i < effectivePlan.length; i++) {
     const stepResult: string = await context.run(`execute-step-${i + 1}`, async () => {
       return think(
         env.GEMINI_API_KEY,
-        `You are executing step ${i + 1} of ${plan.length} for task: "${taskType}".
+        `You are executing step ${i + 1} of ${effectivePlan.length} for task: "${taskType}".
 
 Previous results:
 ${results.length > 0 ? results.join("\n") : "None yet."}
 
 Current step:
-${plan[i]}
+${effectivePlan[i]}
 
 Execute this step thoroughly and return your complete result.`,
         "You are a precise task executor. Be thorough and accurate.",
@@ -699,7 +861,7 @@ Execute this step thoroughly and return your complete result.`,
       );
     });
 
-    results.push(`Step ${i + 1} [${plan[i]}]: ${stepResult}`);
+    results.push(`Step ${i + 1} [${effectivePlan[i]}]: ${stepResult}`);
 
     await context.run(`persist-progress-${i + 1}`, async () => {
       await updateTask(redis, taskId, {

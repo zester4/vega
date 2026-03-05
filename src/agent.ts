@@ -95,6 +95,7 @@ AGENT INFRASTRUCTURE (MOST POWERFUL)
   get_agent_result → Check sub-agent progress and retrieve results
   list_agents      → See all running/completed sub-agents
   cancel_agent     → Stop a running sub-agent
+  wait_for_agents  → [IMPORTANT] Always call this after spawning multiple agents to block and synthesize their results.
   create_tool      → Build a new tool with real JS code (immediately usable)
   benchmark_tool   → Test a tool's performance and accuracy
 
@@ -137,7 +138,7 @@ BEHAVIORAL RULES
 
 1. For ANY current events, news, prices, people → ALWAYS use web_search first
 2. For JS-rendered pages (React, Next.js, SPAs) → use firecrawl (mode=scrape) or browse_web, NOT fetch_url
-3. For long research tasks → spawn_agent("researcher", instructions) + get_agent_result
+3. For any image generation or long audio tasks (>10s) → ALWAYS use trigger_workflow or spawn_agent. NEVER generate media directly in a /chat response as it will time out.
 4. For parallel work → spawn multiple sub-agents simultaneously
 5. Synthesize results into clear, direct answers — adaptive length (short for facts, detailed for analysis)
 6. When using tools, briefly state what you're doing before the result
@@ -445,7 +446,7 @@ async function agenticLoop(
         const result = await Promise.race([
           generateWithTools(env.GEMINI_API_KEY, contents, allTools as never, systemPrompt),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("generateWithTools timeout (>30s)")), 30_000)
+            setTimeout(() => reject(new Error("generateWithTools timeout (>60s)")), 60_000)
           ),
         ]);
         rawContent = result.rawContent;
@@ -481,21 +482,28 @@ async function agenticLoop(
       // Execute all tool calls in parallel
       const toolResults = await Promise.all(
         functionCalls.map(async (fc) => {
+          // Inject _sessionId for async-capable long-running tools.
+          // generate_image and text_to_speech use this to publish to /run-media
+          // via QStash instead of blocking the SSE stream for 20-90 seconds.
+          const toolArgs = (fc.name === "generate_image" || fc.name === "text_to_speech")
+            ? { ...fc.args, _sessionId: sessionId }
+            : fc.args;
+
           try {
             // Emit tool-start event for frontend
             onEvent?.({
               type: "tool-start",
-              data: { name: fc.name, input: fc.args },
+              data: { name: fc.name, input: toolArgs },
             });
 
             console.log(`[Agent step ${step}] Executing: ${fc.name}`);
-            const result = await executeTool(fc.name, fc.args, env, sessionId);
+            const result = await executeTool(fc.name, toolArgs, env, sessionId);
             console.log(`[Agent step ${step}] ${fc.name} completed`);
 
             // Emit tool-result event for frontend
             onEvent?.({
               type: "tool-result",
-              data: { name: fc.name, input: fc.args, output: result },
+              data: { name: fc.name, input: toolArgs, output: result },
             });
 
             return { name: fc.name, result };
@@ -505,7 +513,7 @@ async function agenticLoop(
 
             onEvent?.({
               type: "tool-error",
-              data: { name: fc.name, input: fc.args, error: errorMsg },
+              data: { name: fc.name, input: toolArgs, error: errorMsg },
             });
 
             return { name: fc.name, result: { error: errorMsg } };

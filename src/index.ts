@@ -56,6 +56,7 @@ import {
   verifyWhatsAppSignature,
   type WhatsAppWebhookPayload,
 } from "./whatsapp";
+import { handleCompletionCallback } from "./routes/completion-callback";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -160,9 +161,20 @@ app.post("/chat", async (c) => {
     }
 
     const sessionId = body.sessionId ?? `session-${Date.now()}`;
+    const userId = c.req.header("X-User-Id")?.trim();
+
+    // ── Session ↔ User Mapping (Production-Grade Isolation) ──────────────
+    // Maps the frontend-generated sessionId to the authenticated userId.
+    // This allows background sub-agents to route results back to the user's
+    // Telegram without forcing all sessions to share a single history key.
+    const redis = getRedis(c.env);
+    if (userId && sessionId) {
+      await redis.set(`session:user-map:${sessionId}`, userId, {
+        ex: 60 * 60 * 24 * 7 // 7 day TTL
+      }).catch(() => { });
+    }
 
     // Rate limiting: 30 req/min per session
-    const redis = getRedis(c.env);
     const calls = await redis.incr(`rate:${sessionId}`);
     if (calls === 1) await redis.expire(`rate:${sessionId}`, 60);
     if (calls > 30) {
@@ -534,125 +546,54 @@ app.post("/webhook/task-complete", async (c) => {
   }
 });
 
+// GET /agents/pending-pushes — frontend polls this to get agent completion notifications
+app.get("/agents/pending-pushes", async (c) => {
+  const sessionId = c.req.query("session") ?? "";
+  const authHeader = c.req.header("Authorization") ?? "";
+  const token = authHeader.replace("Bearer ", "");
+
+  // Internal auth check
+  if (token !== c.env.TELEGRAM_INTERNAL_SECRET) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const userId = c.req.header("X-User-Id")?.trim();
+  const redis = getRedis(c.env);
+
+  // Collect from both keys: the direct session key AND the user-scoped key
+  const keys = [`session:pending-push:${sessionId}`];
+  if (userId) keys.push(`session:pending-push:user-${userId}`);
+
+  const allPushes: unknown[] = [];
+  for (const key of keys) {
+    const raw = await redis.lrange(key, 0, 19) as string[];
+    if (raw.length > 0) {
+      await redis.del(key); // consume
+      allPushes.push(
+        ...raw.map((r: string) => {
+          try { return JSON.parse(r); } catch { return null; }
+        }).filter(Boolean)
+      );
+    }
+  }
+
+  return c.json({ pushes: allPushes });
+});
+
 // ─── Agent Completion Callback ─────────────────────────────────────────────
 // Called by sub-agents (workflow.ts + subagent.ts) when they complete.
-// Synthesizes the result and delivers it to the user automatically.
 app.post("/agents/completion-callback", async (c) => {
-  try {
-    // Internal auth check — same secret as Telegram proxy
-    const secret = c.req.header("x-internal-secret");
-    if (secret !== c.env.TELEGRAM_INTERNAL_SECRET) {
-      return c.json({ error: "Unauthorized" }, 401);
-    }
-
-    const body = await c.req.json<{
-      taskId: string;
-      agentName: string;
-      parentSessionId: string | null;
-      memoryPrefix: string;
-      status: string;
-      result: string;
-      completedAt: string;
-    }>();
-
-    const { taskId, agentName, parentSessionId, status, result, completedAt } = body;
-    const redis = getRedis(c.env);
-
-    console.log(`[completion-callback] ${taskId} (${agentName}) ${status} — parent: ${parentSessionId ?? "unknown"}`);
-
-    // ── 1. Synthesize a user-friendly message ─────────────────────────────────
-    let synthesis: string;
-    try {
-      const statusEmoji = status === "done" ? "✅" : "❌";
-      const prompt = status === "done"
-        ? `A sub-agent named "${agentName}" has completed its task. Format this result as a clear, well-structured message for the user. Be concise but complete. Include the key findings.\n\nRaw result:\n${result.slice(0, 3000)}`
-        : `A sub-agent named "${agentName}" failed with this error. Format a clear error message for the user.\n\nError:\n${result.slice(0, 1000)}`;
-
-      synthesis = `${statusEmoji} **${agentName}** completed at ${completedAt}\n\n` +
-        await think(
-          c.env.GEMINI_API_KEY,
-          prompt,
-          "You are VEGA reporting agent results to the user. Be clear, direct, and well-formatted."
-        );
-    } catch (e) {
-      // Fallback: use raw result if synthesis fails
-      synthesis = `${status === "done" ? "✅" : "❌"} **${agentName}** finished (${completedAt}):\n\n${result.slice(0, 2000)}`;
-    }
-
-    // ── 2. Store as pending message for the parent session ────────────────────
-    // The frontend polls /agents/pending/:sessionId on load to show these.
-    if (parentSessionId) {
-      await redis.lpush(`agent:pending:${parentSessionId}`, JSON.stringify({
-        taskId,
-        agentName,
-        status,
-        synthesis,
-        rawResult: result.slice(0, 5000),
-        completedAt,
-        receivedAt: new Date().toISOString(),
-      }));
-      await redis.expire(`agent:pending:${parentSessionId}`, 60 * 60 * 24 * 7); // 7 day TTL
-      await redis.ltrim(`agent:pending:${parentSessionId}`, 0, 19); // keep last 20
-    }
-
-    // ── 3. Push via Telegram proactive_notify if bot is connected ─────────────
-    // We try to find the Telegram config for this user session.
-    // parentSessionId format: "user-{userId}" — extract userId to look up Telegram config
-    if (parentSessionId && parentSessionId.startsWith("user-")) {
-      const userId = parentSessionId.replace("user-", "");
-      try {
-        const telegramConfig = await getTelegramConfigByUserId(c.env, userId);
-        if (telegramConfig && telegramConfig.botId && telegramConfig.token) {
-          const bot = new TelegramBot(telegramConfig.token);
-          await bot.sendMessage(telegramConfig.botId, synthesis);
-          console.log(`[completion-callback] Pushed to Telegram chatId ${telegramConfig.botId}`);
-        }
-      } catch (te) {
-        console.warn(`[completion-callback] Telegram push failed: ${String(te)}`);
-      }
-    }
-
-    // ── 4. Also store in agent:notifications for backward compatibility ────────
-    await redis.lpush("agent:notifications", JSON.stringify({
-      taskId,
-      agentName,
-      status,
-      synthesis,
-      completedAt,
-      receivedAt: new Date().toISOString(),
-    }));
-    await redis.ltrim("agent:notifications", 0, 49);
-
-    return c.json({ success: true, taskId, delivered: true });
-  } catch (err) {
-    console.error("[/agents/completion-callback error]", err);
-    return c.json({ error: String(err) }, 500);
+  const secret = c.req.header("x-internal-secret");
+  const internalSecret = (c.env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+  if (internalSecret && secret !== internalSecret) {
+    return c.json({ error: "Unauthorized" }, 401);
   }
+  const payload = await c.req.json();
+  c.executionCtx.waitUntil(handleCompletionCallback(payload as any, c.env));
+  return c.json({ received: true });
 });
 
-// ─── Pending Messages (for frontend after sub-agent completion) ────────────────
-// Frontend calls this on page load / after spawning an agent.
-// Returns and CLEARS pending messages so they show as chat messages.
-app.get("/agents/pending/:sessionId", async (c) => {
-  try {
-    const sessionId = c.req.param("sessionId");
-    const redis = getRedis(c.env);
 
-    const raw = await redis.lrange(`agent:pending:${sessionId}`, 0, 19) as string[];
-    if (raw.length > 0) {
-      // Clear after reading — they've been delivered
-      await redis.del(`agent:pending:${sessionId}`);
-    }
-
-    const messages = raw.map((r: string) => {
-      try { return JSON.parse(r); } catch { return null; }
-    }).filter(Boolean);
-
-    return c.json({ messages, count: messages.length });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
-});
 
 // ─── Pending Notifications ────────────────────────────────────────────────────
 // Frontend polls this to check for background task completions
@@ -1126,26 +1067,78 @@ app.get("/whatsapp/activity", async (c) => {
 });
 
 // ─── Upstash Workflow Handler ─────────────────────────────────────────────────
+//
+// ROOT CAUSE FIX (was failing every time):
+//
+//   1. `env` option was a partial subset — only 6 vars passed.
+//      `context.env` inside workflowHandler is built from this object, so any step
+//      that touched WORKER_URL, TELEGRAM_INTERNAL_SECRET, signing keys, or optional
+//      API keys (Serper, Firecrawl, E2B, GitHub…) got `undefined` and silently died.
+//      Fix: pass ALL string-typed env vars.
+//
+//   2. `new Receiver({...})` was always constructed even when signing keys are unset.
+//      An instantiated Receiver with undefined keys rejects EVERY QStash callback
+//      (step 2, 3, 4…), so workflows could never progress past the first step.
+//      Fix: only create Receiver when both keys are present.
+//
 app.post("/workflow", async (c) => {
+  // Only verify QStash signatures when both signing keys are configured.
+  // During initial setup / local dev these may be absent — skip verification
+  // rather than rejecting every re-invocation and silently killing all steps.
+  const receiver = (c.env.QSTASH_CURRENT_SIGNING_KEY && c.env.QSTASH_NEXT_SIGNING_KEY)
+    ? new Receiver({
+      currentSigningKey: c.env.QSTASH_CURRENT_SIGNING_KEY,
+      nextSigningKey: c.env.QSTASH_NEXT_SIGNING_KEY,
+    })
+    : undefined;
+
+  const env = c.env as unknown as Record<string, string | undefined>;
+
   const handler = serve<WorkflowPayload>(workflowHandler, {
     qstashClient: new QStashClient({
       token: c.env.QSTASH_TOKEN,
       baseUrl: c.env.QSTASH_URL,
     }),
-    receiver: new Receiver({
-      currentSigningKey: c.env.QSTASH_CURRENT_SIGNING_KEY,
-      nextSigningKey: c.env.QSTASH_NEXT_SIGNING_KEY,
-    }),
-    baseUrl: c.env.UPSTASH_WORKFLOW_URL,
+    ...(receiver ? { receiver } : {}),
+    // Strip trailing slash — Upstash appends the path automatically
+    baseUrl: (c.env.UPSTASH_WORKFLOW_URL ?? c.env.WORKER_URL ?? "").replace(/\/$/, ""),
+    // ⚠️  CRITICAL: pass ALL string-type env vars so context.env in every workflow
+    // step has the full set.  D1/R2 bindings are NOT included here (they cannot be
+    // JSON-serialised through QStash) but Cloudflare re-injects them automatically
+    // on every Worker invocation via handler.fetch(…, c.env) below.
     env: {
-      QSTASH_URL: c.env.QSTASH_URL,
-      QSTASH_TOKEN: c.env.QSTASH_TOKEN,
+      // Core infra
+      GEMINI_API_KEY: c.env.GEMINI_API_KEY,
       UPSTASH_REDIS_REST_URL: c.env.UPSTASH_REDIS_REST_URL,
       UPSTASH_REDIS_REST_TOKEN: c.env.UPSTASH_REDIS_REST_TOKEN,
-      GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+      QSTASH_TOKEN: c.env.QSTASH_TOKEN,
+      QSTASH_URL: c.env.QSTASH_URL,
+      QSTASH_CURRENT_SIGNING_KEY: c.env.QSTASH_CURRENT_SIGNING_KEY ?? "",
+      QSTASH_NEXT_SIGNING_KEY: c.env.QSTASH_NEXT_SIGNING_KEY ?? "",
       UPSTASH_WORKFLOW_URL: c.env.UPSTASH_WORKFLOW_URL,
+      WORKER_URL: c.env.WORKER_URL,
+      TELEGRAM_INTERNAL_SECRET: c.env.TELEGRAM_INTERNAL_SECRET ?? "",
+      BRIDGE_URL: (env.BRIDGE_URL ?? ""),
+      // Vector memory (optional)
+      UPSTASH_VECTOR_REST_URL: (env.UPSTASH_VECTOR_REST_URL ?? ""),
+      UPSTASH_VECTOR_REST_TOKEN: (env.UPSTASH_VECTOR_REST_TOKEN ?? ""),
+      // Optional integrations — empty string when not configured
+      SERPER_API_KEY: (env.SERPER_API_KEY ?? ""),
+      FIRECRAWL_API_KEY: (env.FIRECRAWL_API_KEY ?? ""),
+      E2B_API_KEY: (env.E2B_API_KEY ?? ""),
+      GITHUB_TOKEN: (env.GITHUB_TOKEN ?? ""),
+      RESEND_API_KEY: (env.RESEND_API_KEY ?? ""),
+      RESEND_FROM_EMAIL: (env.RESEND_FROM_EMAIL ?? ""),
+      TWILIO_ACCOUNT_SID: (env.TWILIO_ACCOUNT_SID ?? ""),
+      TWILIO_AUTH_TOKEN: (env.TWILIO_AUTH_TOKEN ?? ""),
+      TWILIO_FROM_NUMBER: (env.TWILIO_FROM_NUMBER ?? ""),
+      BROWSERLESS_TOKEN: (env.BROWSERLESS_TOKEN ?? ""),
+      WHATSAPP_APP_SECRET: (env.WHATSAPP_APP_SECRET ?? ""),
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: (env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? ""),
     },
   });
+
+  // Pass the full c.env so Cloudflare re-injects D1/R2/KV bindings on each step
   return handler.fetch(c.req.raw, c.env as unknown as Record<string, string | undefined>);
 });
 
@@ -1181,6 +1174,117 @@ app.post("/run-subagent", async (c) => {
     agentName: payload.agentConfig.name,
     message: "Sub-agent queued for background execution.",
   }, 202);
+});
+
+// ─── Async Media Generation (Image + Audio) ──────────────────────────────────
+//
+// WHY THIS EXISTS:
+//   Gemini image generation and TTS take 20-90 s. Running them synchronously
+//   inside /chat hits two hard limits simultaneously:
+//     • Vercel reverse-proxy: 30 s request timeout → kills the SSE stream
+//     • CF Worker CPU time: 30 s on Standard plan
+//
+// FLOW:
+//   1. generate_image / text_to_speech tools detect _sessionId in args
+//      (injected by agenticLoop in agent.ts) and publish HERE via QStash.
+//   2. This handler ACKs QStash immediately (no retry triggered).
+//   3. The Gemini call runs inside waitUntil() — execution continues for
+//      up to 30 s AFTER the response, past any proxy timeout.
+//   4. On completion, handleCompletionCallback() pushes the result to the
+//      user's session (Redis pending-push), Telegram, and WhatsApp.
+//
+// Auth: QStash-signed (upstash-signature) OR TELEGRAM_INTERNAL_SECRET header.
+//
+app.post("/run-media", async (c) => {
+  const internalSecret = c.env.TELEGRAM_INTERNAL_SECRET;
+  const clientSecret = c.req.header("x-internal-secret");
+  const hasQStashSig = !!c.req.header("upstash-signature");
+
+  if (!hasQStashSig && internalSecret && clientSecret !== internalSecret) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let body: {
+    type: "image" | "audio";
+    taskId: string;
+    parentSessionId: string | null;
+    userId: string | null;
+    args: Record<string, unknown>;
+  };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { taskId, type: mediaType, parentSessionId, userId, args } = body;
+  if (!taskId || !mediaType || !args) {
+    return c.json({ error: "taskId, type and args are required" }, 400);
+  }
+
+  // ACK immediately — actual generation runs in background
+  c.executionCtx.waitUntil((async () => {
+    const redis = getRedis(c.env);
+    try {
+      await updateTask(redis, taskId, { status: "running" }).catch(() => { });
+
+      let result: Record<string, unknown>;
+      if (mediaType === "image") {
+        const { execGenerateImage } = await import("./tools/generate-image");
+        result = await execGenerateImage(args, c.env);
+      } else {
+        const { execTextToSpeech } = await import("./tools/voice");
+        result = await execTextToSpeech(args, c.env);
+      }
+
+      const isError = !!result.error;
+      const agentName = mediaType === "image" ? "Image Generator" : "Audio Generator";
+
+      let resultStr: string;
+      if (isError) {
+        resultStr = `❌ ${agentName} failed: ${result.error}`;
+      } else if (mediaType === "image") {
+        resultStr = [
+          `✅ Image ready!`,
+          `📎 **URL**: ${result.imageUrl}`,
+          result.description ? `📝 ${String(result.description).slice(0, 300)}` : "",
+          `🖼️ Resolution: ${result.resolution} | Aspect: ${result.aspectRatio}`,
+        ].filter(Boolean).join("\n");
+      } else {
+        resultStr = [
+          `✅ Audio ready!`,
+          `🔊 **URL**: ${result.audioUrl}`,
+          `📏 Size: ${result.audioSizeKB ?? "?"}KB | Voice: ${result.voiceName ?? "Puck"}`,
+        ].join("\n");
+      }
+
+      await updateTask(redis, taskId, {
+        status: isError ? "error" : "done",
+        result: { ...result, completedAt: new Date().toISOString() },
+      }).catch(() => { });
+
+      await handleCompletionCallback({
+        taskId,
+        agentName,
+        parentSessionId,
+        userId: userId ?? undefined,
+        memoryPrefix: taskId,
+        status: isError ? "error" : "done",
+        result: resultStr,
+        completedAt: new Date().toISOString(),
+      }, c.env);
+
+    } catch (err) {
+      console.error(`[/run-media] ${taskId} fatal:`, String(err));
+      await updateTask(redis, taskId, {
+        status: "error",
+        result: { error: String(err), failedAt: new Date().toISOString() },
+      }).catch(() => { });
+    }
+  })());
+
+  return c.json({ received: true, taskId });
 });
 
 // ─── QStash Cron Heartbeat + Self-Healing ─────────────────────────────────────

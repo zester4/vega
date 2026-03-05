@@ -60,6 +60,62 @@ export async function execTextToSpeech(
 
   if (!text) return { error: "text is required" };
 
+  // ── Async dispatch: avoid SSE stream / Worker timeout ────────────────────────
+  //
+  // Gemini TTS takes 15-60 s per request — it WILL timeout inside a
+  // synchronous /chat request on most plans.  When _sessionId is injected
+  // by agent.ts AND QStash is configured, publish to /run-media instead.
+  //
+  const sessionId = args._sessionId as string | undefined;
+  const workerUrl = (env as unknown as Record<string, string>).WORKER_URL ?? "";
+  const qstashUrl = (env as unknown as Record<string, string>).QSTASH_URL ?? "";
+
+  if (sessionId && env.QSTASH_TOKEN && workerUrl && qstashUrl) {
+    const taskId = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const userId = sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null;
+
+    try {
+      const { Client: QStashClient } = await import("@upstash/qstash");
+      const qstash = new QStashClient({ token: env.QSTASH_TOKEN, baseUrl: qstashUrl });
+
+      const { getRedis, createTask } = await import("../memory");
+      const redis = getRedis(env);
+      await createTask(redis, {
+        id: taskId,
+        type: "tts_generation",
+        payload: { chars: text.length, voiceName, sessionId },
+        status: "pending",
+      });
+
+      const { _sessionId: _drop, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown };
+
+      await qstash.publishJSON({
+        url: `${workerUrl.replace(/\/$/, "")}/run-media`,
+        body: {
+          type: "audio",
+          taskId,
+          parentSessionId: sessionId,
+          userId,
+          args: cleanArgs,
+        },
+        headers: {
+          "x-internal-secret": (env as unknown as Record<string, string>).TELEGRAM_INTERNAL_SECRET ?? "",
+        },
+      });
+
+      return {
+        status: "pending",
+        taskId,
+        message: `🔊 Audio generation queued (${text.length} chars, voice: ${voiceName}). Task: **${taskId}**\n\nYou'll be notified when the WAV is ready. Poll: \`get_task_status("${taskId}")\``,
+        voiceName,
+        charCount: text.length,
+      };
+    } catch (qErr) {
+      console.warn("[text_to_speech] Async queue failed, falling back to sync:", String(qErr));
+    }
+  }
+
+  // ── Synchronous execution (local dev or QStash unavailable) ──────────────────
   try {
     const audioData = await generateGeminiAudio(env.GEMINI_API_KEY, text, voiceName);
     if (!audioData) return { error: "Gemini TTS generation failed" };

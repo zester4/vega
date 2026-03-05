@@ -46,7 +46,8 @@ import {
 export interface CompletionCallbackPayload {
     taskId: string;
     agentName: string;
-    parentSessionId: string | null;   // "user-{userId}" format from /chat proxy
+    parentSessionId: string | null;   // The specific UI session ID
+    userId?: string;                  // Explicit userId from execSpawnAgent
     memoryPrefix: string;
     status: "done" | "error" | string;
     result: string;
@@ -59,9 +60,9 @@ export async function handleCompletionCallback(
     payload: CompletionCallbackPayload,
     env: Env
 ): Promise<void> {
-    const { taskId, agentName, parentSessionId, status, result, completedAt } = payload;
+    const { taskId, agentName, parentSessionId, userId: explicitUserId, status, result, completedAt } = payload;
 
-    console.log(`[CompletionCallback] ${taskId} (${agentName}) → session: ${parentSessionId ?? "none"}, status: ${status}`);
+    console.log(`[CompletionCallback] ${taskId} (${agentName}) → session: ${parentSessionId ?? "none"}, user: ${explicitUserId ?? "none"}, status: ${status}`);
 
     const redis = getRedis(env);
 
@@ -72,25 +73,51 @@ export async function handleCompletionCallback(
         ? `${icon} *Agent '${agentName}' failed*\n\n${result.slice(0, 500)}`
         : `${icon} *Agent '${agentName}' completed*\n\n${result.length > 1500 ? result.slice(0, 1500) + "\n\n_...truncated. Full result stored in memory._" : result}`;
 
-    // ── 2. Store as a pending push message (SSE / chat polling consumers) ──────
-    // Any active chat SSE connection for this session will receive this immediately.
-    // If the user is not online, they'll see it on their next chat load.
-    const pendingKey = `session:pending-push:${parentSessionId ?? "global"}`;
-    await redis.lpush(pendingKey, JSON.stringify({
-        type: "agent-complete",
-        taskId,
+    const pushMsgData = {
+        type: "assistant",
         agentName,
         status,
         message: pushMessage,
         result: result.slice(0, 5000),
         completedAt,
         ts: Date.now(),
-    })).catch(() => { });
-    await redis.expire(pendingKey, 60 * 60 * 24).catch(() => { }); // 24h TTL
+    };
+
+    // ── 2. Store as a pending push message (SSE / chat polling consumers) ──────
+
+    // A. Push to the SPECIFIC session that started the agent (for active UI tab)
+    if (parentSessionId) {
+        const sessionKey = `session:pending-push:${parentSessionId}`;
+        await redis.lpush(sessionKey, JSON.stringify(pushMsgData)).catch(() => { });
+        await redis.expire(sessionKey, 60 * 60 * 24).catch(() => { }); // 24h
+        await redis.ltrim(sessionKey, 0, 19).catch(() => { }); // Keep last 20
+    }
+
+    // B. Push to the USER-WIDE key (for cross-session history and Telegram)
+    // We prefer the explicit userId, but fall back to extracting it from parentSessionId
+    let finalUserId = explicitUserId;
+    if (!finalUserId && parentSessionId?.startsWith("user-")) {
+        finalUserId = parentSessionId.replace("user-", "");
+    }
+
+    // Fallback: look up the session-to-user mapping stored by the /chat proxy
+    // This handles the common case where the UI session is "session-XXXXXXXX" (nanoid)
+    // and was mapped to a userId during authentication.
+    if (!finalUserId && parentSessionId) {
+        try {
+            const mapped = await redis.get(`session:user-map:${parentSessionId}`) as string | null;
+            if (mapped) finalUserId = mapped;
+        } catch { /* non-fatal */ }
+    }
+
+    if (finalUserId) {
+        const userKey = `session:pending-push:user-${finalUserId}`;
+        await redis.lpush(userKey, JSON.stringify(pushMsgData)).catch(() => { });
+        await redis.expire(userKey, 60 * 60 * 24 * 7).catch(() => { }); // 7 days
+        await redis.ltrim(userKey, 0, 19).catch(() => { }); // Keep last 20
+    }
 
     // ── 3. Inject into parent session history so VEGA "sees" it ────────────────
-    // This is the key to VEGA being aware of agent results without the user
-    // having to ask. On next user message, VEGA will have this in context.
     if (parentSessionId) {
         try {
             const historyKey = `session:history:${parentSessionId}`;
@@ -114,26 +141,18 @@ export async function handleCompletionCallback(
         }
     }
 
-    // ── 4. Extract userId from parentSessionId ─────────────────────────────────
-    // parentSessionId format: "user-{userId}" (set by /chat proxy in index.ts)
-    let userId: string | null = null;
-    if (parentSessionId) {
-        const match = parentSessionId.match(/^user-(.+)$/);
-        if (match) userId = match[1];
-    }
-
-    if (!userId) {
+    if (!finalUserId) {
         console.log(`[CompletionCallback] No userId from session ${parentSessionId} — stored in Redis only`);
         return;
     }
 
     // ── 5. Push via Telegram (if connected) ────────────────────────────────────
-    await pushViaTelegram(env, redis, userId, pushMessage, taskId).catch((e) =>
+    await pushViaTelegram(env, redis, finalUserId, pushMessage, taskId, agentName).catch((e) =>
         console.warn(`[CompletionCallback] Telegram push failed: ${String(e)}`)
     );
 
     // ── 6. Push via WhatsApp (if connected) ────────────────────────────────────
-    await pushViaWhatsApp(env, userId, pushMessage, parentSessionId).catch((e) =>
+    await pushViaWhatsApp(env, finalUserId, pushMessage, parentSessionId).catch((e) =>
         console.warn(`[CompletionCallback] WhatsApp push failed: ${String(e)}`)
     );
 }
@@ -145,7 +164,8 @@ async function pushViaTelegram(
     redis: ReturnType<typeof getRedis>,
     userId: string,
     message: string,
-    taskId: string
+    taskId: string,
+    agentName: string
 ): Promise<void> {
     // Look up the user's Telegram config from D1
     const db = (env as { DB?: D1Database }).DB;
@@ -176,27 +196,80 @@ async function pushViaTelegram(
     if (!chatId) return;
 
     // Convert markdown → Telegram HTML
-    const { markdownToHtml: markdownToTelegramHtml } = await import("../telegram");
-    const htmlMessage = markdownToTelegramHtml(message);
+    const { markdownToHtml: markdownToTelegramHtml, TelegramBot } = await import("../telegram");
 
-    // Send via Telegram Bot API
-    const sendRes = await fetch(
-        `https://api.telegram.org/bot${tgConfig.token}/sendMessage`,
-        {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                chat_id: chatId,
-                text: htmlMessage,
-                parse_mode: "HTML",
-                disable_web_page_preview: true,
-            }),
+    // Detect audio and image URLs in the completion message (e.g. from a sub-agent podcast or designer tool)
+    const audioUrls: string[] = [];
+    const imageUrls: string[] = [];
+    const audioRegex = /https?:\/\/[^\s)]+\/files\/voice\/[^\s)]+\.wav/gi;
+    const imageRegex = /https?:\/\/[^\s)]+\/files\/generated\/[^\s)]+\.(?:png|jpg|jpeg)/gi;
+
+    let match;
+    while ((match = audioRegex.exec(message)) !== null) audioUrls.push(match[0]);
+    while ((match = imageRegex.exec(message)) !== null) imageUrls.push(match[0]);
+
+    // Clean the message by removing media URLs and their Markdown containers
+    let cleanMessage = message;
+    for (const url of [...audioUrls, ...imageUrls]) {
+        const mdRegex = new RegExp(`!\\[[^\\]]*\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "gi");
+        cleanMessage = cleanMessage.replace(mdRegex, "");
+        cleanMessage = cleanMessage.replace(url, "");
+    }
+    cleanMessage = cleanMessage.replace(/\n{3,}/g, "\n\n").trim();
+
+    const htmlMessage = markdownToTelegramHtml(cleanMessage);
+    const bot = new TelegramBot(tgConfig.token);
+
+    // 1. Send text message (if anything left after removing media links)
+    if (htmlMessage.trim()) {
+        const sendRes = await fetch(
+            `https://api.telegram.org/bot${tgConfig.token}/sendMessage`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    text: htmlMessage,
+                    parse_mode: "HTML",
+                    disable_web_page_preview: true,
+                }),
+            }
+        );
+
+        if (!sendRes.ok) {
+            const err = await sendRes.json() as { description?: string };
+            console.warn(`[CompletionCallback] Telegram text send failed: ${err.description}`);
         }
-    );
+    }
 
-    if (!sendRes.ok) {
-        const err = await sendRes.json() as { description?: string };
-        throw new Error(`Telegram send failed: ${err.description}`);
+    // 2. Send detected audio files as voice messages (Fetch-then-Push: fetch bytes, not URL)
+    if (audioUrls.length > 0) {
+        for (const audioUrl of audioUrls) {
+            try {
+                const audioRes = await fetch(audioUrl);
+                if (!audioRes.ok) throw new Error(`Fetch status ${audioRes.status}`);
+                const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
+                await bot.sendVoice(chatId, audioBytes, {
+                    caption: `🔊 ${agentName} Audio`,
+                });
+            } catch (aErr) {
+                console.warn(`[CompletionCallback] Telegram voice send failed: ${String(aErr)}`);
+            }
+        }
+    }
+
+    // 3. Send detected image files as photos
+    if (imageUrls.length > 0) {
+        for (const imageUrl of imageUrls) {
+            try {
+                const imgRes = await fetch(imageUrl);
+                if (!imgRes.ok) throw new Error(`Fetch status ${imgRes.status}`);
+                const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
+                await bot.sendPhoto(chatId, imageBytes, `🎨 ${agentName} Image`);
+            } catch (imgErr) {
+                console.warn(`[CompletionCallback] Telegram photo send failed: ${String(imgErr)}`);
+            }
+        }
     }
 
     console.log(`[CompletionCallback] ✅ Pushed to Telegram chat ${chatId} for user ${userId}`);

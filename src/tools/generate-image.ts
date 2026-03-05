@@ -34,6 +34,69 @@ export async function execGenerateImage(
   env: Env
 ): Promise<Record<string, unknown>> {
   const prompt = String(args.prompt ?? "");
+
+  // ── Async dispatch: avoid SSE stream / Worker timeout ────────────────────────
+  //
+  // Gemini image generation takes 20-90 seconds — well beyond the 30 s
+  // Vercel proxy / CF Worker CPU time limits. When agent.ts injects
+  // `_sessionId` into args AND QStash is configured, we publish to
+  // /run-media and return a task ID immediately. The actual generation runs
+  // inside waitUntil() on the /run-media endpoint and the result is pushed
+  // back via handleCompletionCallback (→ Telegram / pending-pushes / Redis).
+  //
+  const sessionId = args._sessionId as string | undefined;
+  const workerUrl = (env as unknown as Record<string, string>).WORKER_URL ?? "";
+  const qstashUrl = (env as unknown as Record<string, string>).QSTASH_URL ?? "";
+
+  if (sessionId && env.QSTASH_TOKEN && workerUrl && qstashUrl) {
+    const taskId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    // Extract userId for completion-callback push (format: "user-{userId}")
+    const userId = sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null;
+
+    try {
+      const { Client: QStashClient } = await import("@upstash/qstash");
+      const qstash = new QStashClient({ token: env.QSTASH_TOKEN, baseUrl: qstashUrl });
+
+      // Create a task record so get_task_status can poll it
+      const { getRedis, createTask } = await import("../memory");
+      const redis = getRedis(env);
+      await createTask(redis, {
+        id: taskId,
+        type: "image_generation",
+        payload: { prompt: prompt.slice(0, 200), sessionId },
+        status: "pending",
+      });
+
+      // Strip the injected _sessionId before forwarding args to /run-media
+      const { _sessionId: _drop, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown };
+
+      await qstash.publishJSON({
+        url: `${workerUrl.replace(/\/$/, "")}/run-media`,
+        body: {
+          type: "image",
+          taskId,
+          parentSessionId: sessionId,
+          userId,
+          args: cleanArgs,
+        },
+        headers: {
+          "x-internal-secret": (env as unknown as Record<string, string>).TELEGRAM_INTERNAL_SECRET ?? "",
+        },
+      });
+
+      return {
+        status: "pending",
+        taskId,
+        message: `🎨 Image generation queued (may take 20-90 s). Task: **${taskId}**\n\nYou'll be notified automatically when it's ready (Telegram / chat). Poll anytime: \`get_task_status("${taskId}")\``,
+        prompt: prompt.slice(0, 100),
+      };
+    } catch (qErr) {
+      // QStash publish failed — fall through to synchronous execution
+      console.warn("[generate_image] Async queue failed, falling back to sync:", String(qErr));
+    }
+  }
+
+  // ── Synchronous execution (local dev or QStash unavailable) ──────────────────
   const resolution = (
     VALID_RESOLUTIONS.includes(args.resolution as Resolution)
       ? args.resolution
