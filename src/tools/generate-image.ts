@@ -196,7 +196,7 @@ export async function execGenerateImage(
         await env.FILES_BUCKET.put(filename, imageBytes, {
           httpMetadata: { contentType: imageMime },
         });
-        imageUrl = `${(env as any).WORKER_URL || env.UPSTASH_WORKFLOW_URL || ""}/files/${filename}`;
+        imageUrl = `${(env as any).WORKER_URL || ""}/files/${filename}`;
       } catch (r2Err) {
         console.error("[generate_image] R2 store failed:", r2Err);
         // Fall back: return compact base64 (truncated for display)
@@ -287,7 +287,7 @@ export async function execEditImageConversational(
       await env.FILES_BUCKET.put(filename, imageBytes, {
         httpMetadata: { contentType: imageMime },
       });
-      imageUrl = `${env.UPSTASH_WORKFLOW_URL ?? ""}/files/${filename}`;
+      imageUrl = `${(env as any).WORKER_URL ?? ""}/files/${filename}`;
     }
 
     return {

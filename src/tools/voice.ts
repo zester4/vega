@@ -137,7 +137,7 @@ export async function execTextToSpeech(
       await env.FILES_BUCKET.put(filename, wavBytes, {
         httpMetadata: { contentType: "audio/wav" },
       });
-      audioUrl = `${(env as never as Record<string, string>).UPSTASH_WORKFLOW_URL ?? ""}/files/${filename}`;
+      audioUrl = `${(env as never as Record<string, string>).WORKER_URL ?? ""}/files/${filename}`;
     }
 
     return {

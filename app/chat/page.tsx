@@ -420,28 +420,94 @@ function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: stri
 }
 
 function InlineAudio({ url }: { url: string }) {
-  // Extract filename for display
-  const filename = url.split("/").pop()?.split(/[?#]/)[0] ?? "Audio Message";
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+
+  const filename = url.split("/").pop()?.split(/[?#]/)[0] ?? "audio.wav";
+
+  const toggle = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (playing) { a.pause(); } else { a.play(); }
+  };
+
+  const seek = (e: { target: HTMLInputElement }) => {
+    const a = audioRef.current;
+    if (!a || !duration) return;
+    a.currentTime = Number(e.target.value);
+  };
+
+  const fmt = (s: number) => {
+    if (!isFinite(s) || isNaN(s)) return "0:00";
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  };
 
   return (
-    <span className="my-2 p-3 sm:p-4 rounded-xl border border-white/10 bg-white/5 backdrop-blur-md max-w-[400px] shadow-lg block">
+    <span className="my-2 p-3 sm:p-4 rounded-xl border border-white/10 bg-white/5 backdrop-blur-md max-w-[420px] shadow-lg block group">
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+      <audio
+        ref={audioRef}
+        src={url}
+        preload="metadata"
+        onLoadedMetadata={(e) => { setDuration((e.target as HTMLAudioElement).duration); setLoaded(true); }}
+        onTimeUpdate={(e) => setCurrent((e.target as HTMLAudioElement).currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => { setPlaying(false); setCurrent(0); }}
+        className="hidden"
+      />
+      {/* Header */}
       <span className="flex items-center gap-3 mb-3">
-        <span className="size-10 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 shadow-inner">
-          <AudioLinesIcon className="size-5 text-emerald-400" />
-        </span>
+        <button
+          onClick={toggle}
+          className="size-10 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 flex items-center justify-center border border-emerald-500/30 shadow-inner transition-all shrink-0"
+          aria-label={playing ? "Pause" : "Play"}
+        >
+          {playing ? (
+            <span className="flex gap-[3px] items-end h-4">
+              {[...Array(3)].map((_, i) => (
+                <span key={i} className="w-[3px] bg-emerald-400 rounded-full animate-pulse" style={{ height: `${60 + i * 20}%`, animationDelay: `${i * 0.15}s` }} />
+              ))}
+            </span>
+          ) : (
+            <svg viewBox="0 0 24 24" fill="currentColor" className="size-4 text-emerald-400 translate-x-px">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          )}
+        </button>
         <span className="flex-1 min-w-0 flex flex-col">
           <span className="text-[12px] font-bold text-white tracking-tight">VEGA Audio</span>
           <span className="text-[10px] text-white/40 truncate font-mono">{filename}</span>
         </span>
+        <span className="text-[10px] font-mono text-white/30 shrink-0">
+          {fmt(currentTime)}{loaded && duration ? ` / ${fmt(duration)}` : ""}
+        </span>
       </span>
-      <audio
-        controls
-        src={url}
-        className="w-full h-9 brightness-90 contrast-125 saturate-50 opacity-90 hover:opacity-100 transition-opacity block"
-      />
-      <span className="mt-2 flex items-center justify-between px-1">
-        <span className="text-[10px] text-white/20 select-none uppercase tracking-widest font-mono">24kHz PCM</span>
-        <a href={url} download className="text-[10px] text-emerald-400 hover:text-emerald-300 transition-colors uppercase font-bold">Download</a>
+      {/* Progress bar */}
+      <span className="relative block h-1.5 rounded-full bg-white/10 mb-3 overflow-hidden">
+        <span
+          className="absolute inset-y-0 left-0 bg-emerald-500/70 rounded-full transition-all"
+          style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
+        />
+        <input
+          type="range"
+          min={0}
+          max={duration || 1}
+          step={0.01}
+          value={currentTime}
+          onChange={seek}
+          className="absolute inset-0 w-full opacity-0 cursor-pointer h-full"
+          aria-label="Seek"
+        />
+      </span>
+      {/* Footer */}
+      <span className="flex items-center justify-between px-0.5">
+        <span className="text-[9px] text-white/20 select-none uppercase tracking-widest font-mono">24kHz WAV</span>
+        <a href={url} download className="text-[9px] text-emerald-400 hover:text-emerald-300 transition-colors uppercase font-bold tracking-wide">↓ Download</a>
       </span>
     </span>
   );

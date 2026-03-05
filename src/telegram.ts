@@ -1081,7 +1081,12 @@ async function processMessage(
                 await bot.sendChatAction(chatId, "upload_document");
                 // Fetch the audio bytes from our own R2/Worker endpoint
                 const audioRes = await fetch(audioUrl);
-                if (!audioRes.ok) throw new Error(`Fetch status ${audioRes.status}`);
+                // If 404: file may not exist yet (async TTS still generating).
+                // The completion-callback will send it when ready — skip here.
+                if (!audioRes.ok) {
+                    console.warn(`[Telegram Audio] Skipping ${audioUrl} — status ${audioRes.status}`);
+                    return;
+                }
                 const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
                 await bot.sendVoice(chatId, audioBytes, {
                     reply_to_message_id: msg.message_id,
