@@ -99,12 +99,12 @@ export default function TasksDashboardPage() {
       }
 
       if (allFailed) {
-        throw new Error("Failed to load mission control data from the worker");
+        throw new Error("Failed to load task data from the worker");
       }
     } catch (err) {
       console.error(err);
       setError(
-        err instanceof Error ? err.message : "Failed to load mission control data"
+        err instanceof Error ? err.message : "Failed to load task data"
       );
     } finally {
       setLoading(false);
@@ -171,7 +171,7 @@ export default function TasksDashboardPage() {
           <div>
             <h1 className="text-xl sm:text-2xl font-bold text-[#e8e8ea] flex items-center gap-2">
               <ActivityIcon className="size-5 sm:size-6 text-[#00e5cc]" />
-              Mission Control
+              Tasks
             </h1>
             <p className="text-xs sm:text-sm text-[#6b6b7a] mt-1">
               Live view of workflows, sub-agents, cron jobs, and human approvals.

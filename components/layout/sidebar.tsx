@@ -156,7 +156,7 @@ export function Sidebar() {
           />
           <NavItem
             href="/tasks"
-            label={isCollapsed ? "" : "Mission Control"}
+            label={isCollapsed ? "" : "Tasks"}
             icon={ActivityIcon}
           />
           <NavItem

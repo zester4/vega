@@ -62,11 +62,11 @@ export default function Home() {
               href="/chat"
               className="group relative flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[#00e5cc] px-8 text-xs font-bold uppercase tracking-widest text-[#0a0a0b] transition-all hover:bg-[#00e5cc]/90 hover:shadow-[0_0_30px_rgba(0,229,204,0.3)] hover:-translate-y-0.5 sm:w-auto"
             >
-              <span className="relative z-10">→ Open Mission Control</span>
+              <span className="relative z-10">→ Chat</span>
             </Link>
 
             <a
-              href="https://github.com/Tarikul-Islam-Anik/vega"
+              href="https://github.com/zester4/vega"
               target="_blank"
               className="flex h-14 w-full items-center justify-center rounded-lg border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-sm px-8 text-xs font-bold uppercase tracking-widest transition-all hover:bg-[#1e1e22] hover:text-[#00e5cc] hover:-translate-y-0.5 sm:w-auto"
             >

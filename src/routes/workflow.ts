@@ -99,13 +99,24 @@ export async function workflowHandler(context: WorkflowContext): Promise<void> {
       await handlePlanExecute(context, env, redis, taskId, taskType, instructions, steps);
     }
   } catch (err) {
-    // Mark task as errored but don't rethrow (allow QStash retry logic to apply)
+    // WorkflowAbort is thrown by Upstash after every completed step — it is
+    // NORMAL control flow, not an error. Re-throw immediately so QStash can
+    // orchestrate the next step. Never mark the task as failed for this.
+    if (
+      err instanceof Error &&
+      (err.message?.includes("WorkflowAbort") ||
+        err.constructor?.name === "WorkflowAbort" ||
+        err.message?.includes("Aborting workflow after executing step"))
+    ) {
+      throw err;
+    }
+
+    // Genuine fatal error — mark task and re-throw for QStash retry
     console.error(`[Workflow] ${taskId} fatal error:`, String(err));
     await updateTask(redis, taskId, {
       status: "error",
       result: { error: String(err), failedAt: new Date().toISOString() },
     }).catch(() => { });
-    // Re-throw so QStash knows to retry if appropriate
     throw err;
   }
 }
@@ -191,11 +202,14 @@ async function handleSubAgent(
       const { listTools } = await import("../memory");
 
       // Load persisted state
-      const stateRaw = await redis.get<string>(stateKey);
+      // NOTE: Upstash Redis auto-deserializes JSON, so stateRaw may already be
+      // a WfState object (not a string). JSON.parse(String(object)) → "[object Object]"
+      // which crashes. Handle both cases safely.
+      const stateRaw = await redis.get<WfState | string>(stateKey);
       if (!stateRaw) {
         return { done: true, text: "[Workflow state expired — Redis TTL hit]", toolsCalled: [] as string[] };
       }
-      const state: WfState = JSON.parse(String(stateRaw));
+      const state: WfState = typeof stateRaw === "string" ? JSON.parse(stateRaw) : stateRaw as WfState;
       if (state.done) {
         return { done: true, text: state.finalText ?? "", toolsCalled: [] as string[] };
       }
@@ -295,10 +309,11 @@ async function handleSubAgent(
     // If no text emerged (loop exhausted without clean termination), synthesise
     if (!result) {
       const { think } = await import("../gemini");
-      const stateRaw = await redis.get<string>(stateKey);
-      const sysPrompt = stateRaw
-        ? (JSON.parse(String(stateRaw)) as WfState).systemPrompt
-        : "You are a helpful assistant.";
+      const stateRaw = await redis.get<WfState | string>(stateKey);
+      const parsedState = stateRaw
+        ? (typeof stateRaw === "string" ? JSON.parse(stateRaw) : stateRaw) as WfState
+        : null;
+      const sysPrompt = parsedState?.systemPrompt ?? "You are a helpful assistant.";
       result = await think(
         env.GEMINI_API_KEY,
         `Summarise what was accomplished for this task:\n\n${instructions}`,
@@ -383,9 +398,15 @@ export async function fireCompletionCallback(
     completedAt: string;
   }
 ): Promise<void> {
-  const workerBase = (env.WORKER_URL ?? "").trim().replace(/\/$/, "");
+  // WORKER_URL and UPSTASH_WORKFLOW_URL both point to the same Worker.
+  // Use whichever is available — they're identical in wrangler.toml.
+  const workerBase = (
+    (env.WORKER_URL ?? "").trim() ||
+    (env.UPSTASH_WORKFLOW_URL ?? "").trim()
+  ).replace(/\/$/, "");
+
   if (!workerBase) {
-    console.warn("[fireCompletionCallback] WORKER_URL not set — cannot self-call");
+    console.warn("[fireCompletionCallback] Neither WORKER_URL nor UPSTASH_WORKFLOW_URL set. Result is in Redis: task:" + payload.taskId);
     return;
   }
 

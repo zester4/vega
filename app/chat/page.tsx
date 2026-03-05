@@ -1079,7 +1079,7 @@ function ChatPageContent() {
             {/* Footer status */}
             <div className="flex items-center justify-between px-2 opacity-60">
               <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono">
-                MISSION: <span className="text-[#00e5cc]">{sessionId.slice(-8).toUpperCase()}</span>{" "}
+                SESSION: <span className="text-[#00e5cc]">{sessionId.slice(-8).toUpperCase()}</span>{" "}
                 <span className="hidden sm:inline">[{logCount} LOG ENTRIES]</span>
               </p>
               <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono text-right">

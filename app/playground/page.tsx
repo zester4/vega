@@ -99,7 +99,7 @@ export default function AgentPlaygroundPage() {
             <span className="font-semibold text-[#e8e8ea]">Sub-agents</span>{" "}
             and{" "}
             <span className="font-semibold text-[#e8e8ea]">
-              Mission Control
+              Agents
             </span>{" "}
             dashboards.
           </p>

@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VEGA · Mission Control",
+  title: "VEGA · Autonomous AI Agent Framework",
   description: "Autonomous tool-calling AI agent on the edge",
 };
 
