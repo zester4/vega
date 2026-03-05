@@ -43,6 +43,6 @@ next-env.d.ts
 .env.local
 .env
 .dev.vars
-.\wrangler
+.wrangler
 dist
-.\dist
+.dist

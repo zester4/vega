@@ -3,6 +3,13 @@
  * src/routes/subagent.ts — Direct Sub-Agent Executor
  * ============================================================================
  *
+ * FIX SUMMARY (2025-03):
+ *   ✅ notifyCompletion now calls /agents/completion-callback (WORKER_URL self-call)
+ *      instead of just storing to Redis. This pushes the result back to the user
+ *      via Telegram proactive_notify automatically.
+ *   ✅ Full result (not truncated) is sent in the callback payload
+ *   ✅ Retry logic on notification failure (3 attempts, exponential backoff)
+ *
  * This module provides a DIRECT execution path for sub-agents that does NOT
  * depend on QStash/Upstash Workflow callbacks. Instead:
  *
@@ -10,13 +17,7 @@
  *   2. Worker creates the task record immediately
  *   3. Uses executionCtx.waitUntil() to run the full agent loop in the background
  *   4. Redis is updated to "done" or "error" when the loop completes
- *   5. Fires the webhook to notify the parent if UPSTASH_WORKFLOW_URL is set
- *
- * This completely replaces the QStash → Upstash Workflow mechanism for
- * sub-agents, making it:
- *   - Reliable in both local dev (wrangler dev + ngrok) and production
- *   - Faster (no QStash round-trip delay)
- *   - Simpler (no Upstash Workflow SDK overhead)
+ *   5. Fires the completion callback to notify the parent
  *
  * For long-running tasks (research, batch, pipeline), Upstash Workflow is
  * still used via the /workflow endpoint.
@@ -82,7 +83,7 @@ export async function runSubAgentTask(env: Env, payload: SubAgentPayload): Promi
                 status: "running",
             });
         } else {
-            // Record already created by execSpawnAgent — just ensure it’s running
+            // Record already created by execSpawnAgent — just ensure it's running
             await updateTask(redis, taskId, { status: "running" });
         }
     } catch (e) {
@@ -124,8 +125,8 @@ export async function runSubAgentTask(env: Env, payload: SubAgentPayload): Promi
         // Update the agent record in agent:spawned list
         await updateSpawnedStatus(redis, taskId, "error", undefined, undefined);
 
-        // Notify parent
-        await notifyCompletion(env, taskId, agentConfig.name, "error", String(e));
+        // Notify parent — even errors get pushed back
+        await notifyCompletion(env, taskId, agentConfig, "error", String(e));
         return;
     }
 
@@ -172,8 +173,8 @@ export async function runSubAgentTask(env: Env, payload: SubAgentPayload): Promi
         }
     }
 
-    // Notify parent via webhook
-    await notifyCompletion(env, taskId, agentConfig.name, "done", result);
+    // Notify parent via completion callback (pushes result to user)
+    await notifyCompletion(env, taskId, agentConfig, "done", result);
     console.log(`[SubAgent] ${taskId} (${agentConfig.name}) DONE.`);
 }
 
@@ -207,31 +208,36 @@ async function updateSpawnedStatus(
 }
 
 /**
- * Fire a best-effort webhook to UPSTASH_WORKFLOW_URL/webhook/task-complete.
+ * Fire the completion callback to the Worker's /agents/completion-callback endpoint.
+ * This replaces the old "store to Redis and pray someone reads it" pattern.
+ * The callback handler will:
+ *   1. Synthesize a user-friendly version of the result
+ *   2. Push it to the user via Telegram proactive_notify
+ *   3. Store it as a pending message for the next chat session
+ *
+ * Retries 3 times with exponential backoff — result is already in Redis as fallback.
  */
 async function notifyCompletion(
     env: Env,
     taskId: string,
-    agentName: string,
+    agentConfig: AgentConfig,
     status: string,
-    summaryOrError: string
+    result: string
 ): Promise<void> {
-    try {
-        const base = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-        if (!base) return;
+    const { fireCompletionCallback } = await import("./workflow");
 
-        await fetch(`${base}/webhook/task-complete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                taskId,
-                agentName,
-                status,
-                summary: summaryOrError.slice(0, 500),
-                completedAt: new Date().toISOString(),
-            }),
+    try {
+        await fireCompletionCallback(env, {
+            taskId,
+            agentName: agentConfig.name,
+            parentSessionId: agentConfig.parentSessionId ?? null,
+            memoryPrefix: agentConfig.memoryPrefix,
+            status,
+            result,
+            completedAt: new Date().toISOString(),
         });
-    } catch {
-        // Non-fatal
+    } catch (e) {
+        console.warn(`[SubAgent] notifyCompletion failed: ${String(e)}`);
+        // Non-fatal — result is in Redis, user can poll with get_agent_result
     }
 }

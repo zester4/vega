@@ -821,7 +821,8 @@ type ToolArgs = Record<string, unknown>;
 export async function executeTool(
   toolName: string,
   args: ToolArgs,
-  env: Env
+  env: Env,
+  callerSessionId?: string
 ): Promise<Record<string, unknown>> {
   try {
     // Track tool usage for self-evolution heuristics
@@ -865,8 +866,8 @@ export async function executeTool(
       // Agent Infrastructure
       case "trigger_workflow": return await execTriggerWorkflow(args, env);
       case "get_task_status": return await execGetTaskStatus(args, env);
-      case "spawn_agent": return await execSpawnAgent(args, env);
-      case "invoke_agent": return await execInvokeAgent(args, env);
+      case "spawn_agent": return await execSpawnAgent(args, env, callerSessionId);
+      case "invoke_agent": return await execInvokeAgent(args, env, callerSessionId);
       case "get_agent_result": return await execGetAgentResult(args, env);
       case "list_agents": return await execListAgents(args, env);
       case "cancel_agent": return await execCancelAgent(args, env);
@@ -1805,7 +1806,7 @@ async function execGetTaskStatus(args: ToolArgs, env: Env): Promise<Record<strin
   };
 }
 
-async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
   const {
     agentName,
     instructions,
@@ -1834,6 +1835,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
     notifyEmail: notifyEmail ?? null,
     spawnedAt: new Date().toISOString(),
     parentAgent: "vega-core",
+    parentSessionId: callerSessionId ?? null,
   };
 
   const payload = {
@@ -1888,7 +1890,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
     if (delaySeconds > 0) {
       try {
         const { Client: WorkflowClient } = await import("@upstash/workflow");
-        const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
+        const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN, baseUrl: env.QSTASH_URL });
 
         const notBeforeTs = Math.floor(Date.now() / 1000) + delaySeconds;
         const scheduledRecord = {
@@ -1933,7 +1935,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env): Promise<Record<string, 
   // long the agent takes. QStash handles retries on failure automatically.
   try {
     const { Client: WorkflowClient } = await import("@upstash/workflow");
-    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
+    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN, baseUrl: env.QSTASH_URL });
 
     const { workflowRunId } = await wfClient.trigger({
       url: `${workerBase}/workflow`,
@@ -2014,7 +2016,7 @@ function parseScheduledFor(input: string): number {
 
 // ─── Invoke (reuse) a previously-spawned agent with a NEW task ────────────────
 
-export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+export async function execInvokeAgent(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
   const { agentId, instructions } = args as { agentId: string; instructions: string };
 
   if (!agentId || !instructions) {
@@ -2040,6 +2042,7 @@ export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<
       notifyEmail: string | null;
       spawnedAt: string;
       parentAgent: string;
+      parentSessionId?: string | null;
     };
   };
   try {
@@ -2065,6 +2068,7 @@ export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<
     agentConfig: {
       ...originalConfig,
       spawnedAt: new Date().toISOString(),
+      parentSessionId: callerSessionId ?? originalConfig.parentSessionId ?? null,
     },
   };
 
@@ -2097,7 +2101,7 @@ export async function execInvokeAgent(args: ToolArgs, env: Env): Promise<Record<
 
   try {
     const { Client: WorkflowClient } = await import("@upstash/workflow");
-    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN });
+    const wfClient = new WorkflowClient({ token: env.QSTASH_TOKEN, baseUrl: env.QSTASH_URL });
 
     const { workflowRunId } = await wfClient.trigger({
       url: `${workerBase}/workflow`,

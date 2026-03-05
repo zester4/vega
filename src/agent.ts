@@ -207,6 +207,7 @@ export async function runAgent(
       env,
       history,
       userMessage,
+      sessionId,
       effectiveSystemPrompt,
       10, // maxSteps
       onEvent,
@@ -340,6 +341,7 @@ async function agenticLoop(
   env: Env,
   history: ChatMessage[],
   userMessage: string,
+  sessionId: string,
   systemPrompt: string,
   maxSteps = 10,
   onEvent?: (event: ToolEvent) => void,
@@ -446,7 +448,7 @@ async function agenticLoop(
             });
 
             console.log(`[Agent step ${step}] Executing: ${fc.name}`);
-            const result = await executeTool(fc.name, fc.args, env);
+            const result = await executeTool(fc.name, fc.args, env, sessionId);
             console.log(`[Agent step ${step}] ${fc.name} completed`);
 
             // Emit tool-result event for frontend

@@ -270,7 +270,7 @@ function streamingResponse(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",   // Disable nginx/Cloudflare buffering
+      "X-Accel-Buffering": "no",   
       "Access-Control-Allow-Origin": "*",
     },
   });
@@ -360,19 +360,25 @@ app.delete("/task/:id", async (c) => {
 app.get("/agents", async (c) => {
   try {
     const redis = getRedis(c.env);
-    console.log(`[/agents] Redis URL: ${c.env.UPSTASH_REDIS_REST_URL?.slice(0, 25)}...`);
-
     const status = c.req.query("status") ?? "all";
-    const raw = await redis.lrange("agent:spawned", 0, 99) as string[];
-    console.log(`[/agents] Found ${raw.length} agents in agent:spawned`);
+    const sessionId = c.req.query("sessionId");
 
+    const raw = await redis.lrange("agent:spawned", 0, 199) as string[];
     const agents = raw.map((r: string) => {
       try { return JSON.parse(r); } catch { return null; }
     }).filter(Boolean);
 
-    const filtered = status === "all"
-      ? agents
-      : agents.filter((a: Record<string, unknown>) => a.status === status);
+    let filtered = agents;
+    
+    // Filter by status if requested
+    if (status !== "all") {
+      filtered = filtered.filter((a: any) => a.status === status);
+    }
+
+    // Filter by sessionId if provided (Multi-tenant)
+    if (sessionId) {
+      filtered = filtered.filter((a: any) => a.parentSessionId === sessionId);
+    }
 
     return c.json({ agents: filtered, count: filtered.length });
   } catch (err) {
@@ -516,6 +522,126 @@ app.post("/webhook/task-complete", async (c) => {
     return c.json({ success: true, taskId: body.taskId });
   } catch (err) {
     console.error("[/webhook/task-complete error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Agent Completion Callback ─────────────────────────────────────────────
+// Called by sub-agents (workflow.ts + subagent.ts) when they complete.
+// Synthesizes the result and delivers it to the user automatically.
+app.post("/agents/completion-callback", async (c) => {
+  try {
+    // Internal auth check — same secret as Telegram proxy
+    const secret = c.req.header("x-internal-secret");
+    if (secret !== c.env.TELEGRAM_INTERNAL_SECRET) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const body = await c.req.json<{
+      taskId: string;
+      agentName: string;
+      parentSessionId: string | null;
+      memoryPrefix: string;
+      status: string;
+      result: string;
+      completedAt: string;
+    }>();
+
+    const { taskId, agentName, parentSessionId, status, result, completedAt } = body;
+    const redis = getRedis(c.env);
+
+    console.log(`[completion-callback] ${taskId} (${agentName}) ${status} — parent: ${parentSessionId ?? "unknown"}`);
+
+    // ── 1. Synthesize a user-friendly message ─────────────────────────────────
+    let synthesis: string;
+    try {
+      const statusEmoji = status === "done" ? "✅" : "❌";
+      const prompt = status === "done"
+        ? `A sub-agent named "${agentName}" has completed its task. Format this result as a clear, well-structured message for the user. Be concise but complete. Include the key findings.\n\nRaw result:\n${result.slice(0, 3000)}`
+        : `A sub-agent named "${agentName}" failed with this error. Format a clear error message for the user.\n\nError:\n${result.slice(0, 1000)}`;
+
+      synthesis = `${statusEmoji} **${agentName}** completed at ${completedAt}\n\n` +
+        await think(
+          c.env.GEMINI_API_KEY,
+          prompt,
+          "You are VEGA reporting agent results to the user. Be clear, direct, and well-formatted."
+        );
+    } catch (e) {
+      // Fallback: use raw result if synthesis fails
+      synthesis = `${status === "done" ? "✅" : "❌"} **${agentName}** finished (${completedAt}):\n\n${result.slice(0, 2000)}`;
+    }
+
+    // ── 2. Store as pending message for the parent session ────────────────────
+    // The frontend polls /agents/pending/:sessionId on load to show these.
+    if (parentSessionId) {
+      await redis.lpush(`agent:pending:${parentSessionId}`, JSON.stringify({
+        taskId,
+        agentName,
+        status,
+        synthesis,
+        rawResult: result.slice(0, 5000),
+        completedAt,
+        receivedAt: new Date().toISOString(),
+      }));
+      await redis.expire(`agent:pending:${parentSessionId}`, 60 * 60 * 24 * 7); // 7 day TTL
+      await redis.ltrim(`agent:pending:${parentSessionId}`, 0, 19); // keep last 20
+    }
+
+    // ── 3. Push via Telegram proactive_notify if bot is connected ─────────────
+    // We try to find the Telegram config for this user session.
+    // parentSessionId format: "user-{userId}" — extract userId to look up Telegram config
+    if (parentSessionId && parentSessionId.startsWith("user-")) {
+      const userId = parentSessionId.replace("user-", "");
+      try {
+        const telegramConfig = await getTelegramConfigByUserId(c.env, userId);
+        if (telegramConfig && telegramConfig.botId && telegramConfig.token) {
+          const bot = new TelegramBot(telegramConfig.token);
+          await bot.sendMessage(telegramConfig.botId, synthesis);
+          console.log(`[completion-callback] Pushed to Telegram chatId ${telegramConfig.botId}`);
+        }
+      } catch (te) {
+        console.warn(`[completion-callback] Telegram push failed: ${String(te)}`);
+      }
+    }
+
+    // ── 4. Also store in agent:notifications for backward compatibility ────────
+    await redis.lpush("agent:notifications", JSON.stringify({
+      taskId,
+      agentName,
+      status,
+      synthesis,
+      completedAt,
+      receivedAt: new Date().toISOString(),
+    }));
+    await redis.ltrim("agent:notifications", 0, 49);
+
+    return c.json({ success: true, taskId, delivered: true });
+  } catch (err) {
+    console.error("[/agents/completion-callback error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// ─── Pending Messages (for frontend after sub-agent completion) ────────────────
+// Frontend calls this on page load / after spawning an agent.
+// Returns and CLEARS pending messages so they show as chat messages.
+app.get("/agents/pending/:sessionId", async (c) => {
+  try {
+    const sessionId = c.req.param("sessionId");
+    const redis = getRedis(c.env);
+
+    const raw = await redis.lrange(`agent:pending:${sessionId}`, 0, 19) as string[];
+    if (raw.length > 0) {
+      // Clear after reading — they've been delivered
+      await redis.del(`agent:pending:${sessionId}`);
+    }
+
+    const messages = raw.map((r: string) => {
+      try { return JSON.parse(r); } catch { return null; }
+    }).filter(Boolean);
+
+    return c.json({ messages, count: messages.length });
+  } catch (err) {
     return c.json({ error: String(err) }, 500);
   }
 });
@@ -875,8 +1001,7 @@ app.post("/run-subagent", async (c) => {
   }, 202);
 });
 
-// ─── QStash Cron Heartbeat ────────────────────────────────────────────────────
-// QStash calls this endpoint on schedule. We verify the signature before acting.
+// ─── QStash Cron Heartbeat + Self-Healing ─────────────────────────────────────
 app.post("/cron/tick", async (c) => {
   try {
     const receiver = new Receiver({
@@ -893,11 +1018,76 @@ app.post("/cron/tick", async (c) => {
     }
 
     const redis = getRedis(c.env);
+    const healingReport: string[] = [];
 
-    // Agent self-reflection
+    // ── Self-healing: detect and recover stuck agents ─────────────────────────
+    try {
+      const STUCK_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes
+      const now = Date.now();
+
+      const agentListRaw = await redis.lrange("agent:spawned", 0, 99) as string[];
+
+      for (let i = 0; i < agentListRaw.length; i++) {
+        try {
+          const agent = JSON.parse(agentListRaw[i]);
+          if (agent.status !== "running") continue;
+
+          const age = now - new Date(agent.spawnedAt).getTime();
+          if (age < STUCK_THRESHOLD_MS) continue;
+
+          // Double-check the task record in Redis
+          const task = await getTask(redis, agent.agentId);
+          if (!task || task.status !== "running") continue;
+
+          // It's genuinely stuck — mark as error
+          const errorMsg = `Agent timed out after ${Math.round(age / 60000)} minutes with no completion signal.`;
+          await updateTask(redis, agent.agentId, {
+            status: "error",
+            result: {
+              error: errorMsg,
+              failedAt: new Date().toISOString(),
+              selfHealed: true,
+            },
+          });
+
+          // Update spawned list
+          agent.status = "error";
+          agent.error = errorMsg;
+          agent.healedAt = new Date().toISOString();
+          await redis.lset("agent:spawned", i, JSON.stringify(agent));
+
+          healingReport.push(`Marked stuck agent '${agent.agentName}' (${agent.agentId}) as error after ${Math.round(age / 60000)}m`);
+
+          // Notify user via completion callback (sends Telegram + pending message)
+          if (agent.parentSessionId) {
+            const { fireCompletionCallback } = await import("./routes/workflow");
+            await fireCompletionCallback(c.env, {
+              taskId: agent.agentId,
+              agentName: agent.agentName,
+              parentSessionId: agent.parentSessionId,
+              memoryPrefix: agent.agentConfig?.memoryPrefix ?? agent.agentId,
+              status: "error",
+              result: `Agent '${agent.agentName}' timed out. It ran for ${Math.round(age / 60000)} minutes without completing. You can try spawning it again.`,
+              completedAt: new Date().toISOString(),
+            }).catch((e) => console.warn("[cron/healing notify failed]", String(e)));
+          }
+        } catch (agentErr) {
+          console.warn("[cron/tick] Agent healing check failed:", String(agentErr));
+        }
+      }
+
+      if (healingReport.length > 0) {
+        console.log(`[cron/tick] Self-healing: ${healingReport.join("; ")}`);
+      }
+    } catch (healErr) {
+      console.error("[cron/tick] Self-healing scan failed:", String(healErr));
+    }
+
+    // ── Agent self-reflection ─────────────────────────────────────────────────
     const reflection = await think(
       c.env.GEMINI_API_KEY,
       `You are VEGA running a periodic self-check. Time: ${new Date().toISOString()}.
+Self-healing report: ${healingReport.length > 0 ? healingReport.join("; ") : "All agents healthy."}
 
 Review your current state and suggest ONE concrete action:
 - Check if any sub-agents need attention
@@ -914,17 +1104,25 @@ Max 80 words. Be specific and actionable.`,
     await redis.set("agent:last-tick", JSON.stringify({
       timestamp: Date.now(),
       reflection,
+      healingReport,
       iso: new Date().toISOString(),
     }), { ex: 60 * 60 * 25 }); // 25 hours TTL
 
-    // Self-evolving tool ecosystem: analyze usage and create composite tools when helpful
+    // Self-evolving tool ecosystem
     try {
       await analyzeToolUsageAndEvolve(c.env);
     } catch (e) {
       console.error("[ToolEvolution error]", e);
     }
 
-    return c.json({ success: true, reflection });
+    return c.json({
+      success: true,
+      reflection,
+      selfHealing: {
+        agentsFixed: healingReport.length,
+        actions: healingReport,
+      },
+    });
   } catch (err) {
     console.error("[/cron/tick error]", err);
     return c.json({ error: String(err) }, 500);

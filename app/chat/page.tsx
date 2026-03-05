@@ -546,6 +546,8 @@ function ChatPageContent() {
     scrollToBottom();
   }, [messages, liveTools, scrollToBottom]);
 
+  // ── Poll for pending sub-agent results ──────────────────────────────────────
+
   // ── Persist messages ────────────────────────────────────────────────────────
 
   const persistMessages = useCallback((msgs: ChatMessage[]) => {
@@ -581,6 +583,42 @@ function ChatPageContent() {
       localStorage.setItem("vega-sessions", JSON.stringify(sessions.slice(0, 50)));
     } catch { /* ignore */ }
   }, [sessionId]);
+
+  // ── Poll for pending sub-agent results ──────────────────────────────────────
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const checkPending = async () => {
+      try {
+        const res = await fetch("/api/agents/pending");
+        const data = (await res.json()) as { messages?: any[] };
+
+        if (data.messages && data.messages.length > 0) {
+          const newMessages: ChatMessage[] = data.messages.map((msg: any) => ({
+            id: nanoid(),
+            role: "assistant",
+            content: msg.synthesis,
+            timestamp: Date.now(),
+          }));
+
+          setMessages((prev) => {
+            const updated = [...prev, ...newMessages];
+            // We use a small timeout to let state update before persisting
+            setTimeout(() => persistMessages(updated), 0);
+            return updated;
+          });
+        }
+      } catch (err) {
+        console.warn("[pending check failed]", err);
+      }
+    };
+
+    // Check on load + every 30s
+    checkPending();
+    const interval = setInterval(checkPending, 30_000);
+    return () => clearInterval(interval);
+  }, [sessionId, persistMessages]);
 
   // ── Send message ────────────────────────────────────────────────────────────
 

@@ -3,7 +3,12 @@
  * src/routes/workflow.ts — VEGA Durable Workflow Engine
  * ============================================================================
  *
- * Powered by Upstash Workflow (QStash-backed durable execution).
+ * FIX SUMMARY (2025-03):
+ *   ✅ AgentConfig now carries parentSessionId — the spawning session
+ *   ✅ wf-finalize fires POST /agents/completion-callback (not just a silent
+ *      /webhook/task-complete that nobody consumes)
+ *   ✅ completion-callback synthesizes the result, pushes via Telegram
+ *      proactive_notify, and stores as a pending message for SSE/polling
  *
  * How durability works:
  *   Each context.run("step-id", fn) is a SEPARATE Cloudflare Worker invocation.
@@ -36,6 +41,12 @@ export type AgentConfig = {
   notifyEmail: string | null;
   spawnedAt: string;
   parentAgent: string;
+  /**
+   * NEW: The sessionId of the conversation that spawned this agent.
+   * Used to push the result back to the user when the agent completes.
+   * Format: "user-{userId}" matching the /chat proxy injection.
+   */
+  parentSessionId: string | null;
 };
 
 export type WorkflowPayload = {
@@ -232,7 +243,8 @@ async function handleSubAgent(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         functionCalls.map(async (fc: { name: string; args: Record<string, unknown> }) => {
           try {
-            const result = await executeTool(fc.name, fc.args, env);
+            // Pass sub-agent's own sessionId so nested spawn_agent calls can be tracked
+            const result = await executeTool(fc.name, fc.args, env, `agent-${taskId}`);
             return { name: fc.name, result };
           } catch (e) {
             return { name: fc.name, result: { error: String(e) } };
@@ -276,7 +288,7 @@ async function handleSubAgent(
     }
   }
 
-  // ── Finalise: write results, notify parent ──────────────────────────────────
+  // ── Finalise: write results, push back to parent user ──────────────────────
   await context.run("wf-finalize", async () => {
     let result = finalText;
 
@@ -337,27 +349,65 @@ async function handleSubAgent(
       }
     }
 
-    // Best-effort webhook to notify parent
-    try {
-      const base = (env.UPSTASH_WORKFLOW_URL ?? "").trim().replace(/\/$/, "");
-      if (base) {
-        await fetch(`${base}/webhook/task-complete`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            taskId,
-            agentName: agentConfig.name,
-            status: "done",
-            summary: result.slice(0, 500),
-            completedAt,
-          }),
-        });
-      }
-    } catch { /* non-fatal */ }
+    // ── CRITICAL FIX: Fire completion callback to push result back to user ──
+    // This replaces the old /webhook/task-complete that just stored to Redis
+    // and nobody consumed. Now we actively push the result to the parent session.
+    await fireCompletionCallback(env, {
+      taskId,
+      agentName: agentConfig.name,
+      parentSessionId: agentConfig.parentSessionId,
+      memoryPrefix: agentConfig.memoryPrefix,
+      status: "done",
+      result,
+      completedAt,
+    });
 
-    console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) DONE.`);
+    console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) DONE. Parent notified.`);
     return { done: true, completedAt };
   });
+}
+
+// ─── Completion Callback Helper ───────────────────────────────────────────────
+// Fires POST /agents/completion-callback on the Worker itself (self-call).
+// The handler synthesizes the result and pushes it to the user.
+
+export async function fireCompletionCallback(
+  env: Env,
+  payload: {
+    taskId: string;
+    agentName: string;
+    parentSessionId: string | null;
+    memoryPrefix: string;
+    status: string;
+    result: string;
+    completedAt: string;
+  }
+): Promise<void> {
+  const workerBase = (env.WORKER_URL ?? "").trim().replace(/\/$/, "");
+  if (!workerBase) {
+    console.warn("[fireCompletionCallback] WORKER_URL not set — cannot self-call");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${workerBase}/agents/completion-callback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // Internal auth — same secret used for Telegram proxy
+        "x-internal-secret": env.TELEGRAM_INTERNAL_SECRET ?? "",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(`[fireCompletionCallback] Non-OK response: ${res.status} — ${body}`);
+    }
+  } catch (e) {
+    // Non-fatal — result is already in Redis, worst case user polls for it
+    console.warn(`[fireCompletionCallback] fetch failed: ${String(e)}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
