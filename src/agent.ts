@@ -23,6 +23,7 @@ import {
   think,
   chat,
   generateWithTools,
+  uploadToGemini,
   type ChatMessage,
   type RawContent,
   type RawPart,
@@ -200,6 +201,26 @@ export async function runAgent(
 
   const effectiveSystemPrompt = dynamicPrompt;
 
+  // ── Process Attachments: Upload to Gemini Files API for accuracy ───────────
+  const processedAttachments: { mimeType: string; fileUri: string }[] = [];
+  if (attachments && attachments.length > 0) {
+    for (const att of attachments) {
+      try {
+        // Convert base64 to Uint8Array
+        const binaryString = atob(att.data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+
+        const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, att.mimeType);
+        processedAttachments.push({ mimeType: att.mimeType, fileUri });
+        console.log(`[runAgent] Uploaded attachment to Gemini: ${fileUri} (${att.mimeType})`);
+      } catch (uploadErr) {
+        console.error("[runAgent] Attachment upload failed:", uploadErr);
+        // Fallback to inline data if upload fails (handled in agenticLoop if needed)
+      }
+    }
+  }
+
   let response: string;
 
   try {
@@ -212,7 +233,8 @@ export async function runAgent(
       10, // maxSteps
       onEvent,
       allowedToolNames,
-      attachments
+      attachments,
+      processedAttachments
     );
   } catch (err) {
     console.error("[runAgent error]", err);
@@ -240,8 +262,17 @@ export async function runAgent(
 
   // Persist to history only if response is non-empty
   if (response && response.trim()) {
+    const userParts: ChatMessage["parts"] = [{ text: userMessage }];
+
+    // Add processed attachments to history as fileData
+    if (processedAttachments && processedAttachments.length > 0) {
+      for (const pa of processedAttachments) {
+        userParts.push({ fileData: { fileUri: pa.fileUri, mimeType: pa.mimeType } });
+      }
+    }
+
     await appendHistory(redis, sessionId, [
-      { role: "user", parts: [{ text: userMessage }] },
+      { role: "user", parts: userParts },
       { role: "model", parts: [{ text: response }] },
     ]);
 
@@ -346,7 +377,8 @@ async function agenticLoop(
   maxSteps = 10,
   onEvent?: (event: ToolEvent) => void,
   allowedToolNames?: string[],
-  attachments?: Attachment[]
+  attachments?: Attachment[],
+  processedAttachments?: { mimeType: string; fileUri: string }[]
 ): Promise<string> {
   const redis = getRedis(env);
   const customTools = await listTools(redis);
@@ -367,25 +399,34 @@ async function agenticLoop(
     allTools = allTools.filter((t) => allowed.has(t.name));
   }
 
-  // Seed contents: recent history + current user message (with optional attachments)
+  // Seed contents: recent history + current user message (with multimodal support)
+  // FIX: Preserve all parts (text, inlineData, fileData) from history
   const contents: RawContent[] = [
-    ...history.slice(-10).map((m): RawContent => ({
-      role: m.role,
-      parts: [{ text: m.parts[0].text }],
-    })),
+    ...history.slice(-15).map((m): RawContent => {
+      const parts: RawPart[] = m.parts.map((p) => {
+        if ("text" in p) return { text: p.text };
+        if ("inlineData" in p) return { inlineData: p.inlineData };
+        if ("fileData" in p) return { fileData: p.fileData };
+        return {};
+      });
+      return { role: m.role, parts };
+    }),
   ];
 
   const userParts: RawPart[] = [];
-  if (attachments && attachments.length > 0) {
+
+  // Add processed attachments (prefer fileData for accuracy and efficiency)
+  if (processedAttachments && processedAttachments.length > 0) {
+    for (const pa of processedAttachments) {
+      userParts.push({ fileData: pa });
+    }
+  } else if (attachments && attachments.length > 0) {
+    // Fallback to inlineData if not pre-processed/uploaded
     for (const att of attachments) {
-      userParts.push({
-        // inlineData is supported by the Gemini SDK at runtime; it's not part
-        // of RawPart's TS shape but is accepted when passed to the SDK.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ...({ inlineData: { mimeType: att.mimeType, data: att.data } } as any),
-      });
+      userParts.push({ inlineData: { mimeType: att.mimeType, data: att.data } });
     }
   }
+
   userParts.push({ text: userMessage });
 
   contents.push({ role: "user", parts: userParts });

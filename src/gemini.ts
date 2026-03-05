@@ -28,19 +28,19 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-/** Minimal chat message for persistent history (plain text turns only) */
+/** Minimal chat message for persistent history (supports multimodal) */
 export interface ChatMessage {
   role: "user" | "model";
-  parts: { text: string }[];
+  parts: (
+    | { text: string }
+    | { inlineData: { mimeType: string; data: string } }
+    | { fileData: { mimeType: string; fileUri: string } }
+  )[];
 }
 
 /**
  * A raw content part that can include functionCall, functionResponse,
  * and the critical thoughtSignature — used in the agentic tool loop.
- *
- * As shown in the multi-turn diagram:
- *   Turn 1 Step 2 → must include Signature A from FC1
- *   Turn 1 Step 3 → must include Signature A (FC1) + Signature B (FC2)
  */
 export interface RawPart {
   text?: string;
@@ -48,6 +48,8 @@ export interface RawPart {
   thoughtSignature?: string;
   functionCall?: { name: string; args: Record<string, unknown> };
   functionResponse?: { name: string; response: unknown };
+  inlineData?: { mimeType: string; data: string };
+  fileData?: { mimeType: string; fileUri: string };
 }
 
 export interface RawContent {
@@ -278,5 +280,99 @@ export async function transcribeGeminiAudio(
   } catch (err) {
     console.error("[transcribeGeminiAudio error]", err);
     return "";
+  }
+}
+
+// ─── Multimodal: upload file to Gemini Files API (REST) ─────────────────────
+/**
+ * Uploads a file to Gemini's 48-hour persistent storage.
+ * returns { fileUri, mimeType }
+ */
+export async function uploadToGemini(
+  apiKey: string,
+  data: Uint8Array | ArrayBuffer,
+  mimeType: string,
+  displayName?: string
+): Promise<{ fileUri: string; mimeType: string }> {
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+  const numBytes = bytes.length;
+
+  // 1. Initial resumable request to get upload URL
+  const initRes = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": numBytes.toString(),
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        file: { display_name: displayName ?? `vega-file-${Date.now()}` },
+      }),
+    }
+  );
+
+  if (!initRes.ok) {
+    throw new Error(`Gemini upload init failed: ${initRes.status} ${await initRes.text()}`);
+  }
+
+  const uploadUrl = initRes.headers.get("x-goog-upload-url");
+  if (!uploadUrl) {
+    throw new Error("Gemini upload failed: No x-goog-upload-url in headers");
+  }
+
+  // 2. Upload actual bytes
+  const uploadRes = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: bytes as any, // Cast to any to avoid BodyInit/SharedArrayBuffer issues in some environments
+  });
+
+  if (!uploadRes.ok) {
+    throw new Error(`Gemini upload failed: ${uploadRes.status} ${await uploadRes.text()}`);
+  }
+
+  const result = (await uploadRes.json()) as { file: { uri: string; mimeType: string } };
+  return {
+    fileUri: result.file.uri,
+    mimeType: result.file.mimeType,
+  };
+}
+
+// ─── Multimodal: analyze document/image via Files API or inline data ────────
+export async function analyzeDocument(
+  apiKey: string,
+  prompt: string,
+  options: {
+    fileUri?: string;
+    imageBase64?: string;
+    mimeType?: string;
+  }
+): Promise<string> {
+  const ai = getAI(apiKey);
+  const parts: any[] = [{ text: prompt }];
+
+  if (options.fileUri && options.mimeType) {
+    parts.push({ fileData: { fileUri: options.fileUri, mimeType: options.mimeType } });
+  } else if (options.imageBase64 && options.mimeType) {
+    parts.push({ inlineData: { data: options.imageBase64, mimeType: options.mimeType } });
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL,
+      contents: [{ role: "user", parts }],
+      config: { thinkingConfig: { includeThoughts: false } },
+    });
+    return response.text ?? "";
+  } catch (err) {
+    console.error("[analyzeDocument error]", err);
+    return `Error analyzing document: ${String(err)}`;
   }
 }

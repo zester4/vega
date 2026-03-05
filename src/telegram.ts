@@ -411,6 +411,8 @@ I'm an autonomous AI agent that can:
 /tasks — Background tasks & cron jobs
 /memory — Stored memories
 /goals — Active goal tracker
+/tools — List all available agent tools
+/heartbeat — Ensure system cron is active
 /voice_on — Enable voice replies
 /voice_off — Disable voice replies
       `.trim(), { parse_mode: "HTML" });
@@ -428,6 +430,8 @@ I'm an autonomous AI agent that can:
 /tasks — Background tasks (sub-agents & workflows)
 /memory — Stored memories for this chat
 /goals — Active goal tracker with progress bars
+/tools — List all available agent tools
+/heartbeat — Ensure system cron is active
 /voice_on — Enable Gemini voice replies
 /voice_off — Disable voice replies
 
@@ -464,7 +468,7 @@ I'm an autonomous AI agent that can:
             for (const goal of result.goals.slice(0, 8)) {
                 const filled = Math.round(goal.progress / 10);
                 const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
-                const pIcon = goal.priority === "critical" ? "\ud83d\udd34" : goal.priority === "high" ? "\ud83d\udfe0" : goal.priority === "medium" ? "\ud83d\udfe1" : "\ud83d�";
+                const pIcon = goal.priority === "critical" ? "\ud83d\udd34" : goal.priority === "high" ? "\ud83d\udfe0" : goal.priority === "medium" ? "\ud83d\udfe1" : "\ud83d";
                 goalsText += `${pIcon} <b>${escapeHtml(goal.title)}</b>\n`;
                 goalsText += `[${bar}] ${goal.progress}%\n`;
                 if (goal.nextAction) goalsText += `\ud83d\udccc <i>${escapeHtml(goal.nextAction.slice(0, 80))}</i>\n`;
@@ -605,6 +609,51 @@ ${tick?.reflection ? `\n<i>${escapeHtml(tick.reflection)}</i>` : ""}
             break;
         }
 
+        case "/tools": {
+            const { getRedis, listTools } = await import("./memory");
+            const { BUILTIN_DECLARATIONS } = await import("./tools/builtins");
+            const redis = getRedis(env);
+            const customTools = await listTools(redis);
+
+            let list = "<b>🔧 Available Tools</b>\n\n";
+
+            list += "<b>Built-in:</b>\n";
+            const builtinNames = BUILTIN_DECLARATIONS.map(t => `<code>${t.name}</code>`).join(", ");
+            list += builtinNames + "\n\n";
+
+            if (customTools.length > 0) {
+                list += "<b>Custom (Self-built):</b>\n";
+                const customNames = customTools.map(t => `<code>${t.name}</code>`).join(", ");
+                list += customNames + "\n\n";
+            }
+
+            list += "<i>Tip: Ask me what any tool does to learn more!</i>";
+
+            await bot.sendMessage(chatId, list.trim(), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/heartbeat": {
+            const { executeTool } = await import("./tools/builtins");
+            await bot.sendChatAction(chatId, "typing");
+            const result = await executeTool("setup_system_heartbeat", {}, env);
+            
+            if (result.success) {
+                await bot.sendMessage(chatId, `
+✅ <b>System Heartbeat Active</b>
+
+<b>Status:</b> ${result.status ?? "registered"}
+<b>Schedule:</b> <code>${result.cron}</code>
+<b>Purpose:</b> Reflection, self-healing, tool evolution
+
+VEGA is now autonomously monitoring itself every hour.
+                `.trim(), { parse_mode: "HTML" });
+            } else {
+                await bot.sendMessage(chatId, `❌ <b>Failed to setup heartbeat:</b> ${result.error}`, { parse_mode: "HTML" });
+            }
+            break;
+        }
+
         default: {
             // Unknown command — treat as regular message
             const args = text.slice(command.length).trim();
@@ -695,7 +744,31 @@ async function processMessage(
 
     // ── DOCUMENT handling ────────────────────────────────────────────────────────
     if (msg.document) {
-        fullMessage = `[User sent document: ${msg.document.file_name ?? "unknown"}${userText ? ` — ${userText}` : ""}]`;
+        try {
+            await bot.sendChatAction(chatId, "upload_document");
+            const file = await bot.getFile(msg.document.file_id);
+            const bytes = await bot.downloadFile(file.file_path);
+            const mimeType = msg.document.mime_type ?? "application/octet-stream";
+
+            const { uploadToGemini } = await import("./gemini");
+            const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, mimeType, msg.document.file_name);
+
+            // Store attachment data on the msg object temporarily for use in runAgent call below
+            (msg as any)._vega_attachment = {
+                mimeType,
+                data: btoa(String.fromCharCode(...bytes)),
+                name: msg.document.file_name
+            };
+
+            fullMessage = userText
+                ? `[User sent document: ${msg.document.file_name ?? "unknown"}] ${userText}`
+                : `[User sent document: ${msg.document.file_name ?? "unknown"}] Analyze this file.`;
+            
+            console.log(`[Telegram Document] Uploaded to Gemini: ${fileUri} (${mimeType})`);
+        } catch (docErr) {
+            console.error("[Telegram Document] Failed:", docErr);
+            fullMessage = `[User sent document: ${msg.document.file_name ?? "unknown"}${userText ? ` — ${userText}` : ""}]`;
+        }
     }
 
     if (!fullMessage.trim()) return;
@@ -752,6 +825,9 @@ async function processMessage(
     // Collect images generated by the agent during this turn
     const generatedImages: Array<{ url: string; description: string; mimeType: string }> = [];
 
+    // Extract any attachments we added to the msg object
+    const tgAttachments = (msg as any)._vega_attachment ? [(msg as any)._vega_attachment] : undefined;
+
     let reply: string;
     try {
         reply = await runAgent(env, sessionId, fullMessage, undefined, async (event) => {
@@ -774,7 +850,7 @@ async function processMessage(
                     }
                 }
             }
-        });
+        }, undefined, tgAttachments);
     } catch (err) {
         if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
         await bot.sendMessage(chatId,
@@ -1172,11 +1248,11 @@ export function markdownToHtml(text: string): string {
  * Escape a string for safe use inside HTML.
  */
 export function escapeHtml(text: string): string {
-    return text
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+  return text
+    .replace(/&/g, "&" + "amp;")
+    .replace(/</g, "&" + "lt;")
+    .replace(/>/g, "&" + "gt;")
+    .replace(/"/g, "&" + "quot;");
 }
 
 /**

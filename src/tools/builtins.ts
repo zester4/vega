@@ -452,15 +452,26 @@ export const BUILTIN_DECLARATIONS = [
   {
     name: "schedule_cron",
     description:
-      "Create a recurring automated job via QStash that runs on a cron schedule. Use for: hourly monitoring, daily reports, weekly digests, periodic data collection. The agent uses this to schedule its own future tasks autonomously.",
+      "Create a recurring automated job via QStash that runs on a cron schedule. Use for: hourly monitoring, daily reports, weekly digests, periodic data collection. Default behavior is to target the internal heartbeat endpoint if no URL is provided.",
     parameters: {
       properties: {
-        url: { type: "string", description: "Your worker endpoint URL to call on each tick" },
-        cron: { type: "string", description: "Cron expression e.g. '0 9 * * 1' (every Monday 9am UTC), '*/30 * * * *' (every 30 min)" },
-        body: { type: "string", description: "JSON payload to send on each invocation" },
-        description: { type: "string", description: "Human-readable description of what this job does" },
+        url: { type: "string", description: "Worker endpoint URL. Defaults to the system heartbeat endpoint (/cron/tick)." },
+        cron: { type: "string", description: "Cron expression e.g. '0 * * * *' (hourly), '0 9 * * 1' (Mondays 9am UTC)." },
+        body: { type: "string", description: "Optional JSON payload string to send on each tick." },
+        description: { type: "string", description: "Human-readable description of this job's purpose." },
       },
-      required: ["url", "cron", "description"],
+      required: ["cron", "description"],
+    },
+  },
+
+  {
+    name: "setup_system_heartbeat",
+    description: "Ensure the production system heartbeat is active. This cron handles agent self-healing, reflection loops, and autonomous tool evolution. Running this tool will register or update the hourly VEGA heartbeat.",
+    parameters: {
+      properties: {
+        force: { type: "boolean", description: "Force re-creation even if it already exists." },
+      },
+      required: [],
     },
   },
 
@@ -811,6 +822,18 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  {
+    name: "analyze_document",
+    description: "Perform deep visual and structural analysis on a document or image stored in R2. Use this for PDFs with complex layouts, charts, tables, or images where text extraction alone is insufficient. Gemini native vision will 'look' at the file and address your prompt.",
+    parameters: {
+      properties: {
+        path: { type: "string", description: "Path to the file in R2 e.g. 'reports/invoice.pdf'" },
+        prompt: { type: "string", description: "What to look for or analyze in the document e.g. 'Extract the total amount and line items from this invoice table.'" },
+      },
+      required: ["path", "prompt"],
+    },
+  },
+
 ] as const;
 
 // ─── Type Helpers ─────────────────────────────────────────────────────────────
@@ -858,6 +881,7 @@ export async function executeTool(
       case "read_file": return await execReadFile(args, env);
       case "list_files": return await execListFiles(args, env);
       case "delete_file": return await execDeleteFile(args, env);
+      case "analyze_document": return await execAnalyzeDocument(args, env);
 
       // Code & Compute
       case "run_code": return await execRunCode(args, env);
@@ -882,6 +906,7 @@ export async function executeTool(
 
       // Scheduling
       case "schedule_cron": return await execScheduleCron(args, env);
+      case "setup_system_heartbeat": return await execSetupHeartbeat(args, env);
       case "list_crons": return await execListCrons(args, env);
       case "update_cron": return await execUpdateCron(args, env);
       case "delete_cron": return await execDeleteCron(args, env);
@@ -1618,13 +1643,43 @@ async function execReadFile(args: ToolArgs, env: Env): Promise<Record<string, un
     return { found: false, path, message: `File '${path}' not found.` };
   }
 
+  const contentType = obj.httpMetadata?.contentType ?? "text/plain";
+  
+  // If it's a non-text file (PDF or Image), use Gemini to "read" it accurately
+  if (contentType.includes("pdf") || contentType.includes("image/")) {
+    try {
+      const bytes = await obj.arrayBuffer();
+      const { uploadToGemini, analyzeDocument } = await import("../gemini");
+      const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, contentType, path);
+      
+      const analysis = await analyzeDocument(
+        env.GEMINI_API_KEY,
+        "Extract all text, data, and describe the structure and visual elements of this document accurately.",
+        { fileUri, mimeType: contentType }
+      );
+
+      return {
+        found: true,
+        path,
+        contentType,
+        isVisualAnalysis: true,
+        analysis,
+        size: obj.size,
+        message: "Visual file analyzed via Gemini Multimodal API.",
+      };
+    } catch (err) {
+      console.error("[read_file visual analysis failed]", err);
+      return { error: `Failed to analyze visual file: ${String(err)}`, path };
+    }
+  }
+
   const content = await obj.text();
   return {
     found: true,
     path,
     content,
     size: content.length,
-    contentType: obj.httpMetadata?.contentType ?? "unknown",
+    contentType,
     metadata: obj.customMetadata,
   };
 }
@@ -1656,6 +1711,40 @@ async function execDeleteFile(args: ToolArgs, env: Env): Promise<Record<string, 
 
   await env.FILES_BUCKET.delete(path);
   return { success: true, deleted: path };
+}
+
+async function execAnalyzeDocument(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { path, prompt } = args as { path: string; prompt: string };
+
+  if (!env.FILES_BUCKET) {
+    return { error: "FILES_BUCKET R2 binding not configured." };
+  }
+
+  const obj = await env.FILES_BUCKET.get(path);
+  if (!obj) return { error: `File not found: ${path}` };
+
+  const contentType = obj.httpMetadata?.contentType ?? "application/pdf";
+
+  try {
+    const bytes = await obj.arrayBuffer();
+    const { uploadToGemini, analyzeDocument } = await import("../gemini");
+    const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, contentType, path);
+    
+    const analysis = await analyzeDocument(
+      env.GEMINI_API_KEY,
+      prompt,
+      { fileUri, mimeType: contentType }
+    );
+
+    return {
+      success: true,
+      path,
+      analysis,
+      model: "gemini-3.1-flash-lite-preview",
+    };
+  } catch (err) {
+    return { error: `Analysis failed: ${String(err)}`, path };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2436,44 +2525,84 @@ async function execBenchmarkTool(args: ToolArgs, env: Env): Promise<Record<strin
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function execScheduleCron(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { url, cron, body, description } = args as {
-    url: string; cron: string; body?: string; description: string;
+  let { url, cron, body, description } = args as {
+    url?: string; cron: string; body?: string; description: string;
   };
+
+  // ── Production-grade URL Resolution ─────────────────────────────────────────
+  if (!url) {
+    const base = (env.WORKER_URL ?? "").trim().replace(/\/$/, "");
+    if (!base) return { error: "WORKER_URL not configured. Cannot resolve heartbeat endpoint." };
+    url = `${base}/cron/tick`;
+  }
 
   const qstash = new QStashClient({
     token: env.QSTASH_TOKEN,
     baseUrl: env.QSTASH_URL,
   });
-  const result = await qstash.schedules.create({
-    destination: url,
-    cron,
-    body: body ?? "{}",
-    headers: { "Content-Type": "application/json" },
-  });
 
-  // Persist schedule metadata so the agent and UI can list/manage crons
   try {
-    const { getRedis, saveSchedule } = await import("../memory");
-    const redis = getRedis(env);
-    await saveSchedule(redis, result.scheduleId, {
+    const result = await qstash.schedules.create({
+      destination: url,
+      cron,
+      body: body ?? "{}",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    // Persist schedule metadata
+    try {
+      const { getRedis, saveSchedule } = await import("../memory");
+      const redis = getRedis(env);
+      await saveSchedule(redis, result.scheduleId, {
+        scheduleId: result.scheduleId,
+        cron,
+        description,
+        url,
+        body: body ?? "{}",
+      });
+    } catch (e) {
+      console.warn("[schedule_cron] Metadata persistence failed:", String(e));
+    }
+
+    return {
+      success: true,
       scheduleId: result.scheduleId,
       cron,
       description,
       url,
-      body: body ?? "{}",
-    });
-  } catch (e) {
-    console.warn("[schedule_cron] Failed to save schedule metadata:", String(e));
+      target: url === `${env.WORKER_URL}/cron/tick` ? "system_heartbeat" : "custom",
+    };
+  } catch (err) {
+    return { error: `QStash registration failed: ${String(err)}`, url };
+  }
+}
+
+async function execSetupHeartbeat(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { force = false } = args as { force?: boolean };
+
+  if (!force) {
+    const { getRedis, listSchedules } = await import("../memory");
+    const redis = getRedis(env);
+    const schedules = await listSchedules(redis);
+    const existing = schedules.find(s => s.description.includes("Heartbeat") || s.url?.includes("/cron/tick"));
+    
+    if (existing) {
+      return { 
+        success: true, 
+        status: "active", 
+        message: "System heartbeat already exists.",
+        scheduleId: existing.scheduleId,
+        cron: existing.cron
+      };
+    }
   }
 
-  return {
-    success: true,
-    scheduleId: result.scheduleId,
-    cron,
-    description,
-    url,
-    message: `Cron job created: "${description}" (${cron})`,
-  };
+  // Create new hourly heartbeat
+  return await execScheduleCron({
+    cron: "0 * * * *",
+    description: "VEGA System Heartbeat (Reflection & Self-Healing)",
+    body: JSON.stringify({ type: "heartbeat", ts: Date.now() })
+  }, env);
 }
 
 function execGetDatetime(args: ToolArgs): Record<string, unknown> {
