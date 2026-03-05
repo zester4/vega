@@ -48,6 +48,14 @@ import {
   verifyTelegramInternalSecret,
   TelegramBot
 } from "./telegram";
+import {
+  handleWhatsAppWebhook,
+  setupWhatsAppNumber,
+  disconnectWhatsAppNumber,
+  getWhatsAppConfigForUser,
+  verifyWhatsAppSignature,
+  type WhatsAppWebhookPayload,
+} from "./whatsapp";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -270,7 +278,7 @@ function streamingResponse(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",   
+      "X-Accel-Buffering": "no",
       "Access-Control-Allow-Origin": "*",
     },
   });
@@ -369,7 +377,7 @@ app.get("/agents", async (c) => {
     }).filter(Boolean);
 
     let filtered = agents;
-    
+
     // Filter by status if requested
     if (status !== "all") {
       filtered = filtered.filter((a: any) => a.status === status);
@@ -940,6 +948,180 @@ app.post("/telegram/webhook", async (c) => {
   } catch (err) {
     console.error("[Telegram Webhook] Error parsing JSON:", err);
     return c.json({ error: "Invalid JSON" }, 400);
+  }
+});
+
+// ─── WhatsApp Business Cloud API ──────────────────────────────────────────────
+
+// GET /whatsapp/webhook — Meta webhook verification challenge
+// Called once when you configure the webhook in Meta Developer Console
+app.get("/whatsapp/webhook", (c) => {
+  const mode = c.req.query("hub.mode");
+  const token = c.req.query("hub.verify_token");
+  const challenge = c.req.query("hub.challenge");
+
+  const expectedToken = (c.env as { WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string }).WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+
+  if (mode === "subscribe" && token === expectedToken && challenge) {
+    console.log("[WhatsApp Webhook] Verification successful");
+    return new Response(challenge, { status: 200, headers: { "Content-Type": "text/plain" } });
+  }
+
+  console.warn("[WhatsApp Webhook] Verification failed — token mismatch or missing challenge");
+  return c.json({ error: "Forbidden" }, 403);
+});
+
+// POST /whatsapp/webhook — Incoming message events from Meta
+app.post("/whatsapp/webhook", async (c) => {
+  const rawBody = await c.req.text();
+
+  // Verify HMAC signature (app-level, not per-user)
+  const appSecret = (c.env as { WHATSAPP_APP_SECRET?: string }).WHATSAPP_APP_SECRET;
+  if (appSecret) {
+    const sig = c.req.header("X-Hub-Signature-256") ?? "";
+    const valid = await verifyWhatsAppSignature(rawBody, sig, appSecret);
+    if (!valid) {
+      console.warn("[WhatsApp Webhook] Invalid signature");
+      return c.json({ error: "Invalid signature" }, 401);
+    }
+  }
+
+  let payload: WhatsAppWebhookPayload;
+  try {
+    payload = JSON.parse(rawBody) as WhatsAppWebhookPayload;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+
+  // Return 200 immediately — Meta requires < 5s response or retries
+  // Process asynchronously in background
+  c.executionCtx.waitUntil(
+    handleWhatsAppWebhook(payload, c.env).catch((e) =>
+      console.error("[WhatsApp Webhook] Handler error:", e)
+    )
+  );
+
+  return c.json({ status: "ok" });
+});
+
+// POST /whatsapp/setup — Connect a phone number (called from Next.js settings page)
+app.post("/whatsapp/setup", async (c) => {
+  try {
+    const body = await c.req.json<{
+      phoneNumberId: string;
+      accessToken: string;
+      wabaId?: string;
+      userId?: string;
+    }>();
+
+    if (!body.phoneNumberId || !body.accessToken) {
+      return c.json({ error: "phoneNumberId and accessToken are required" }, 400);
+    }
+
+    // Auth: requires X-User-Id + internal secret (same pattern as Telegram)
+    const secret = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+    const internalSecret = (c.env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+    if (internalSecret && secret !== internalSecret) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    const userId = c.req.header("X-User-Id")?.trim() ?? body.userId;
+    if (!userId) {
+      return c.json({ error: "X-User-Id header required" }, 400);
+    }
+
+    const config = await setupWhatsAppNumber(
+      body.phoneNumberId,
+      body.accessToken,
+      c.env,
+      userId,
+      body.wabaId
+    );
+
+    return c.json({
+      success: true,
+      phoneNumber: config.phoneNumber,
+      displayName: config.displayName,
+      webhookUrl: config.webhookUrl,
+      message: `WhatsApp number ${config.phoneNumber} (${config.displayName}) connected!`,
+      nextStep: `Configure your Meta App webhook:\n  URL: ${config.webhookUrl}\n  Verify token: (your WHATSAPP_WEBHOOK_VERIFY_TOKEN secret)\n  Fields: messages`,
+    });
+  } catch (err) {
+    console.error("[/whatsapp/setup error]", err);
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// GET /whatsapp/status — Get current user's WhatsApp connection status
+app.get("/whatsapp/status", async (c) => {
+  try {
+    const secret = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+    const internalSecret = (c.env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+    const userId = (internalSecret && secret === internalSecret)
+      ? c.req.header("X-User-Id")?.trim()
+      : null;
+
+    if (!userId) return c.json({ connected: false });
+
+    const config = await getWhatsAppConfigForUser(c.env, userId);
+    if (!config) return c.json({ connected: false });
+
+    const { getRedis } = await import("./memory");
+    const redis = getRedis(c.env);
+    const activityCount = await redis.llen(`wa:activity:${userId}`).catch(() => 0);
+
+    return c.json({
+      connected: true,
+      phoneNumber: config.phoneNumber,
+      displayName: config.displayName,
+      phoneNumberId: config.phoneNumberId,
+      webhookUrl: config.webhookUrl,
+      connectedAt: config.connectedAt,
+      activityCount,
+    });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// DELETE /whatsapp/disconnect — Remove user's WhatsApp config
+app.delete("/whatsapp/disconnect", async (c) => {
+  try {
+    const secret = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+    const internalSecret = (c.env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+    const userId = (internalSecret && secret === internalSecret)
+      ? c.req.header("X-User-Id")?.trim()
+      : null;
+
+    if (!userId) return c.json({ error: "Unauthorized" }, 401);
+
+    await disconnectWhatsAppNumber(c.env, userId);
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// GET /whatsapp/activity — Recent message activity for the user's number
+app.get("/whatsapp/activity", async (c) => {
+  try {
+    const secret = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "").trim();
+    const internalSecret = (c.env as { TELEGRAM_INTERNAL_SECRET?: string }).TELEGRAM_INTERNAL_SECRET;
+    const userId = (internalSecret && secret === internalSecret)
+      ? c.req.header("X-User-Id")?.trim()
+      : null;
+
+    if (!userId) return c.json({ activity: [] });
+
+    const { getRedis } = await import("./memory");
+    const redis = getRedis(c.env);
+    const raw = await redis.lrange(`wa:activity:${userId}`, 0, 49) as string[];
+    const activity = raw.map((r: string) => {
+      try { return JSON.parse(r); } catch { return null; }
+    }).filter(Boolean);
+
+    return c.json({ activity });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
   }
 });
 

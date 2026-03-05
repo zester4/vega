@@ -20,3 +20,26 @@ CREATE TABLE IF NOT EXISTS ${TELEGRAM_CONFIGS_TABLE} (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_configs_secret ON ${TELEGRAM_CONFIGS_TABLE}(secret);
 `.trim();
+
+// ── NEW: WhatsApp ─────────────────────────────────────────────────────────────
+export const WHATSAPP_CONFIGS_TABLE = "whatsapp_configs" as const;
+
+/**
+ * SQL DDL for whatsapp_configs.
+ * One row per VEGA user. phone_number_id is the unique routing key used to
+ * match incoming webhook events to the correct user session.
+ */
+export const SQL_CREATE_WHATSAPP_CONFIGS = `
+CREATE TABLE IF NOT EXISTS ${WHATSAPP_CONFIGS_TABLE} (
+  user_id         TEXT NOT NULL PRIMARY KEY,
+  phone_number_id TEXT NOT NULL UNIQUE,
+  access_token    TEXT NOT NULL,
+  waba_id         TEXT,
+  phone_number    TEXT,
+  display_name    TEXT,
+  webhook_url     TEXT NOT NULL,
+  connected_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_configs_phone_number_id
+  ON ${WHATSAPP_CONFIGS_TABLE}(phone_number_id);
+`.trim();

@@ -507,11 +507,13 @@ function helpText(): void {
     ["/session <id>", "Switch to a different session"],
     ["/clear", "Clear the terminal"],
     ["/help", "Show this panel"],
+    ["/tools", "List available agent tools"],
+    ["/heartbeat", "Trigger system heartbeat/reflection"],
   ];
   for (const [cmd, desc] of cmds) {
     const c = `${rgb(80, 200, 220)}${C.bold}${cmd}${C.reset}`;
     const d = `${C.dim}${desc}${C.reset}`;
-    const pad = Math.max(0, w - cmd.length - desc.length - 2);
+    const pad = Math.max(0, w - stripAnsi(cmd).length - stripAnsi(d).length - 4);
     console.log(
       `${INDENT}${C.gray}${BOX.v}${C.reset}  ${c}${" ".repeat(pad)}${d}  ${C.gray}${BOX.v}${C.reset}`
     );
@@ -524,17 +526,18 @@ function helpText(): void {
   );
 
   const examples: [string, string][] = [
-    ["Search", '"what\'s the latest news on AI agents?"'],
-    ["Memory", '"remember that I prefer TypeScript"'],
-    ["Market", '"what\'s BTC at right now?"'],
-    ["Goal", '"track goal: ship VEGA v2 by end of month"'],
-    ["Image", '"generate an image of a nebula at dusk"'],
-    ["Schedule", '"run a daily web search on AI papers"'],
+    ["Search", "\"what\\'s the latest news on AI agents?\""],
+    ["Memory", "\"remember that I prefer TypeScript\""],
+    ["Market", "\"what\\'s BTC at right now?\""],
+    ["Goal", "\"track goal: ship VEGA v2 by end of month\""],
+    ["Image", "\"generate an image of a nebula at dusk\""],
+    ["Schedule", "\"run a daily web search on AI papers\""],
+    ["Analyze File", "\"analyze file /path/to/doc.pdf: extract key metrics\""],
   ];
   for (const [label, example] of examples) {
     const l = `${rgb(160, 230, 180)}${C.bold}${label.padEnd(10)}${C.reset}`;
     const e = `${C.dim}${example}${C.reset}`;
-    const pad = Math.max(0, w - label.length - 10 - stripAnsi(e).length - 2);
+    const pad = Math.max(0, w - stripAnsi(l).length - stripAnsi(e).length - 4);
     console.log(
       `${INDENT}${C.gray}${BOX.v}${C.reset}  ${l}${e}${" ".repeat(pad)}  ${C.gray}${BOX.v}${C.reset}`
     );

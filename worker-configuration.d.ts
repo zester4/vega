@@ -12,7 +12,8 @@
  *   BROWSERLESS_TOKEN
  *
  * Bindings (set in wrangler.toml):
- *   FILES_BUCKET → R2 bucket "vega-agent-files"
+ *  FILES_BUCKET → R2 bucket "vega-agent-files"
+ * UPDATED: Added WhatsApp Business + agent mesh vars
  */
 
 interface Env {
@@ -59,4 +60,18 @@ interface Env {
 
   // ── Internal (Next.js ↔ Worker) ───────────────────────────────────────────
   TELEGRAM_INTERNAL_SECRET?: string;          // Shared secret for /telegram/* from Next.js (wrangler secret)
+
+  // ── NEW: WhatsApp Business Cloud API ─────────────────────────────────────
+  // App Secret from Meta App Dashboard — used to verify HMAC signatures on
+  // all incoming webhooks. Set with: wrangler secret put WHATSAPP_APP_SECRET
+  WHATSAPP_APP_SECRET: string;
+
+  // Webhook verify token — set this SAME value in Meta Developer Console
+  // under WhatsApp → Configuration → Webhook → Verify Token.
+  // Set with: wrangler secret put WHATSAPP_WEBHOOK_VERIFY_TOKEN
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: string;
+
+  // ── Misc ─────────────────────────────────────────────────────────────────
+  FIRECRAWL_API_KEY?: string;
+
 }

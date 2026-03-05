@@ -54,3 +54,7 @@ bucket_name = "vega-agent-files"
 # TWILIO_AUTH_TOKEN
 # TWILIO_FROM_NUMBER        → E.164 format e.g. +1234567890
 # BROWSERLESS_TOKEN         → https://browserless.io (for browse_web tool)
+
+# WhatsApp Business Cloud API (Meta)
+# WHATSAPP_APP_SECRET       → wrangler secret put WHATSAPP_APP_SECRET
+# WHATSAPP_WEBHOOK_VERIFY_TOKEN → wrangler secret put WHATSAPP_WEBHOOK_VERIFY_TOKEN

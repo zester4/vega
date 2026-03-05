@@ -176,7 +176,7 @@ async function handleSubAgent(
 
     // Build initial contents: recent history + the current instruction
     const contents: unknown[] = [
-      ...history.slice(-10).map((m: { role: string; parts: { text: string }[] }) => ({
+      ...history.slice(-10).map((m: any) => ({
         role: m.role,
         parts: m.parts,
       })),

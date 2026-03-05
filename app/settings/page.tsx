@@ -1,52 +1,26 @@
-//src/app/settings/page.tsx
 "use client";
 
 /**
- * app/settings/page.tsx — VEGA Settings
+ * app/settings/page.tsx — VEGA Settings (UPDATED: WhatsApp + Telegram)
  *
  * Sections:
- *   1. Telegram Integration — connect your own bot (per user) with live status + activity feed
- *   2. Agent Configuration  — system prompt, model settings (future)
- *   3. Danger Zone          — reset all memory, clear history
- *
- * Telegram Connect Flow (per user, multi-tenant):
- *   1. You create a bot via @BotFather and copy the token
- *   2. Paste the token here → click Connect
- *   3. Frontend POSTs to /api/telegram/setup (Next.js proxy → Worker)
- *   4. Worker validates the token, calls setWebhook, and stores your config in D1 keyed by your user id
- *   5. Status card shows your bot username, webhook URL, and message stats
- *   6. Activity feed polls /api/telegram/activity every 10s (scoped to your account)
+ *   1. Telegram Integration  — connect your own bot (per user, D1-backed)
+ *   2. WhatsApp Integration  — connect your WhatsApp Business number (per user, D1-backed)
+ *   3. Danger Zone           — reset all memory, clear history
  */
 
 import { useState, useEffect, useCallback } from "react";
 import {
-  BotIcon,
-  SendIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  RefreshCwIcon,
-  Trash2Icon,
-  AlertTriangleIcon,
-  ExternalLinkIcon,
-  EyeIcon,
-  EyeOffIcon,
-  ZapIcon,
-  MessageSquareIcon,
-  ClockIcon,
-  WifiIcon,
-  WifiOffIcon,
-  CopyIcon,
-  CheckIcon,
+  BotIcon, SendIcon, CheckCircleIcon, XCircleIcon, RefreshCwIcon,
+  Trash2Icon, AlertTriangleIcon, ExternalLinkIcon, EyeIcon, EyeOffIcon,
+  ZapIcon, MessageSquareIcon, ClockIcon, WifiIcon, WifiOffIcon,
+  CopyIcon, CheckIcon, PhoneIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 // ─── API helper ───────────────────────────────────────────────────────────────
 
-async function api<T>(
-  method: "GET" | "POST" | "DELETE",
-  path: string,
-  body?: unknown
-): Promise<T> {
+async function api<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
@@ -61,11 +35,7 @@ async function api<T>(
 
 interface TelegramStatus {
   connected: boolean;
-  bot?: {
-    id: number;
-    username: string;
-    firstName: string;
-  };
+  bot?: { id: number; username: string; firstName: string };
   webhookUrl?: string;
   connectedAt?: string;
   pendingUpdates?: number;
@@ -73,7 +43,17 @@ interface TelegramStatus {
   activityCount?: number;
 }
 
-interface ActivityItem {
+interface WhatsAppStatus {
+  connected: boolean;
+  phoneNumber?: string;
+  displayName?: string;
+  phoneNumberId?: string;
+  webhookUrl?: string;
+  connectedAt?: string;
+  activityCount?: number;
+}
+
+interface TgActivityItem {
   chatId: number;
   username: string;
   firstName?: string;
@@ -82,43 +62,66 @@ interface ActivityItem {
   ts: number;
 }
 
+interface WaActivityItem {
+  from: string;
+  contactName: string;
+  messagePreview: string;
+  replyPreview: string;
+  wasAudio: boolean;
+  toolsUsed?: string[];
+  ts: number;
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(null);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [whatsappStatus, setWhatsappStatus] = useState<WhatsAppStatus | null>(null);
+  const [tgActivity, setTgActivity] = useState<TgActivityItem[]>([]);
+  const [waActivity, setWaActivity] = useState<WaActivityItem[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchStatus = useCallback(async () => {
+  const fetchTgStatus = useCallback(async () => {
     try {
-      const status = await api<TelegramStatus>("GET", "/telegram/status");
-      setTelegramStatus(status);
-    } catch {
-      setTelegramStatus({ connected: false });
-    } finally {
-      setLoading(false);
-    }
+      const s = await api<TelegramStatus>("GET", "/telegram/status");
+      setTelegramStatus(s);
+    } catch { setTelegramStatus({ connected: false }); }
+    finally { setLoading(false); }
   }, []);
 
-  const fetchActivity = useCallback(async () => {
+  const fetchWaStatus = useCallback(async () => {
     try {
-      const data = await api<{ activity: ActivityItem[] }>("GET", "/telegram/activity");
-      setActivity(data.activity ?? []);
+      const s = await api<WhatsAppStatus>("GET", "/whatsapp/status");
+      setWhatsappStatus(s);
+    } catch { setWhatsappStatus({ connected: false }); }
+  }, []);
+
+  const fetchTgActivity = useCallback(async () => {
+    try {
+      const d = await api<{ activity: TgActivityItem[] }>("GET", "/telegram/activity");
+      setTgActivity(d.activity ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchWaActivity = useCallback(async () => {
+    try {
+      const d = await api<{ activity: WaActivityItem[] }>("GET", "/whatsapp/activity");
+      setWaActivity(d.activity ?? []);
     } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
-    fetchStatus();
-    fetchActivity();
+    fetchTgStatus();
+    fetchWaStatus();
+    fetchTgActivity();
+    fetchWaActivity();
 
-    // Poll for live updates
-    const statusInterval = setInterval(fetchStatus, 15_000);
-    const activityInterval = setInterval(fetchActivity, 10_000);
-    return () => {
-      clearInterval(statusInterval);
-      clearInterval(activityInterval);
-    };
-  }, [fetchStatus, fetchActivity]);
+    const i1 = setInterval(fetchTgStatus, 15_000);
+    const i2 = setInterval(fetchWaStatus, 15_000);
+    const i3 = setInterval(fetchTgActivity, 10_000);
+    const i4 = setInterval(fetchWaActivity, 10_000);
+    return () => { clearInterval(i1); clearInterval(i2); clearInterval(i3); clearInterval(i4); };
+  }, [fetchTgStatus, fetchWaStatus, fetchTgActivity, fetchWaActivity]);
 
   if (loading) {
     return (
@@ -130,72 +133,73 @@ export default function SettingsPage() {
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
-      <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-6 sm:space-y-8">
+      <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8 sm:space-y-10">
 
-        {/* Page header */}
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
+        <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-xl sm:text-2xl font-bold text-[#e8e8ea]">Settings</h1>
-          <p className="text-xs sm:text-sm text-[#6b6b7a] mt-1">
-            Connect integrations and configure VEGA.
-          </p>
+          <p className="text-xs sm:text-sm text-[#6b6b7a] mt-1">Connect integrations and configure VEGA.</p>
         </motion.div>
 
-        {/* ── Telegram Integration ─────────────────────────────────────────────── */}
+        {/* ── Telegram ──────────────────────────────────────────────────────── */}
         <TelegramSection
           status={telegramStatus}
-          activity={activity}
-          onRefresh={fetchStatus}
-          onActivityRefresh={fetchActivity}
+          activity={tgActivity}
+          onRefresh={fetchTgStatus}
+          onActivityRefresh={fetchTgActivity}
         />
 
-        {/* ── Danger Zone ──────────────────────────────────────────────────────── */}
+        {/* ── WhatsApp ──────────────────────────────────────────────────────── */}
+        <WhatsAppSection
+          status={whatsappStatus}
+          activity={waActivity}
+          onRefresh={fetchWaStatus}
+        />
+
+        {/* ── Danger Zone ───────────────────────────────────────────────────── */}
         <DangerZone />
 
-        {/* ── Debug: Force Disconnect (current user only) ─────────────────────── */}
+        {/* Debug */}
         <motion.section
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.3 }}
           className="space-y-3 mt-8 pt-8 border-t border-[#1e1e22]"
         >
-          <p className="text-xs text-[#4a4a58]">Debug: Force clear your Telegram config</p>
-          <button
-            onClick={async () => {
-              if (!confirm("Force clear your Telegram configuration from the backend? This will disconnect your current bot.")) return;
-              try {
-                await api("DELETE", "/telegram/disconnect");
-                alert("✓ Configuration cleared. The bot should now be disconnected.");
-                window.location.reload();
-              } catch (e) {
-                alert(`✗ Error: ${String(e)}\n\n(If proxy failed, check your WORKER_URL env var)`);
-              }
-            }}
-            className="px-3 py-1.5 rounded-lg bg-red-600/10 border border-red-600/30 text-red-500 text-xs font-medium hover:bg-red-600/20 transition-all active:scale-95"
-          >
-            Clear Configuration & Disconnect
-          </button>
+          <p className="text-xs text-[#4a4a58]">Debug: Force clear configurations</p>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={async () => {
+                if (!confirm("Force clear your Telegram configuration?")) return;
+                try { await api("DELETE", "/telegram/disconnect"); window.location.reload(); }
+                catch (e) { alert(`Error: ${String(e)}`); }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-red-600/10 border border-red-600/30 text-red-500 text-xs font-medium hover:bg-red-600/20 transition-all"
+            >
+              Clear Telegram Config
+            </button>
+            <button
+              onClick={async () => {
+                if (!confirm("Force clear your WhatsApp configuration?")) return;
+                try { await api("DELETE", "/whatsapp/disconnect"); window.location.reload(); }
+                catch (e) { alert(`Error: ${String(e)}`); }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-red-600/10 border border-red-600/30 text-red-500 text-xs font-medium hover:bg-red-600/20 transition-all"
+            >
+              Clear WhatsApp Config
+            </button>
+          </div>
         </motion.section>
-
       </div>
     </div>
   );
 }
 
-// ─── Telegram Section ─────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEGRAM SECTION
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function TelegramSection({
-  status,
-  activity,
-  onRefresh,
-  onActivityRefresh,
-}: {
-  status: TelegramStatus | null;
-  activity: ActivityItem[];
-  onRefresh: () => void;
-  onActivityRefresh: () => void;
+function TelegramSection({ status, activity, onRefresh, onActivityRefresh }: {
+  status: TelegramStatus | null; activity: TgActivityItem[];
+  onRefresh: () => void; onActivityRefresh: () => void;
 }) {
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
@@ -204,64 +208,40 @@ function TelegramSection({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const isConnected = status?.connected && status.bot;
 
   const handleConnect = async () => {
     if (!token.trim()) { setError("Paste your bot token first."); return; }
-    setConnecting(true);
-    setError(null);
-    setSuccess(null);
-
+    setConnecting(true); setError(null); setSuccess(null);
     try {
       const data = await api<{ success: boolean; bot: { username: string }; message: string }>(
         "POST", "/telegram/setup", { botToken: token.trim() }
       );
-      setSuccess(data.message);
-      setToken("");
-      onRefresh();
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
-    } finally {
-      setConnecting(false);
-    }
+      setSuccess(data.message); setToken(""); onRefresh();
+    } catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setConnecting(false); }
   };
 
   const handleDisconnect = async () => {
-    if (!confirm("Disconnect the Telegram bot? You can reconnect anytime.")) return;
-    setDisconnecting(true);
-    setError(null);
-    try {
-      await api("DELETE", "/telegram/disconnect");
-      setSuccess("Bot disconnected successfully.");
-      setToken(""); // Clear token input if it was filled
-      onRefresh();
-    } catch (e) {
-      setError(`Failed to disconnect: ${String(e instanceof Error ? e.message : e)}`);
-    } finally {
-      setDisconnecting(false);
-    }
+    if (!confirm("Disconnect the Telegram bot?")) return;
+    setDisconnecting(true); setError(null);
+    try { await api("DELETE", "/telegram/disconnect"); setSuccess("Disconnected."); onRefresh(); }
+    catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setDisconnecting(false); }
   };
 
   const copyWebhook = async () => {
     if (!status?.webhookUrl) return;
     await navigator.clipboard.writeText(status.webhookUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopied(true); setTimeout(() => setCopied(false), 2000);
   };
 
-  const isConnected = status?.connected && status.bot;
-
   return (
-    <motion.section
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.1 }}
-      className="space-y-4"
-    >
+    <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          {/* Telegram logo SVG */}
-          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-[#229ED9]/10 border border-[#229ED9]/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-[#229ED9]/10 border border-[#229ED9]/20">
             <svg className="size-4 sm:size-5" viewBox="0 0 24 24" fill="#229ED9">
               <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
             </svg>
@@ -271,219 +251,96 @@ function TelegramSection({
             <p className="text-[10px] sm:text-xs text-[#6b6b7a]">Chat with VEGA directly in Telegram</p>
           </div>
         </div>
-
-        {/* Connection badge */}
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider ${isConnected
-          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]"
-          : "bg-[#1e1e22] text-[#6b6b7a] border border-[#2a2a30]"
-          }`}>
-          {isConnected
-            ? <><WifiIcon className="size-3" /> Connected</>
-            : <><WifiOffIcon className="size-3" /> Not connected</>
-          }
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider ${isConnected ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-[#1e1e22] text-[#6b6b7a] border border-[#2a2a30]"}`}>
+          {isConnected ? <><WifiIcon className="size-3" /> Connected</> : <><WifiOffIcon className="size-3" /> Not connected</>}
         </div>
       </div>
 
-      {/* Card */}
       <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden shadow-sm">
-
-        {/* ── Connected state ─────────────────────────────────────────────── */}
         {isConnected && status?.bot ? (
           <div className="divide-y divide-[#1e1e22]">
-
-            {/* Bot info */}
             <div className="p-5 flex items-center gap-4">
-              <div className="flex size-12 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/20 text-xl shrink-0">
-                🤖
-              </div>
+              <div className="flex size-12 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/20 text-xl shrink-0">🤖</div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-[#e8e8ea]">
-                  {status.bot.firstName}
-                </p>
+                <p className="text-sm font-semibold text-[#e8e8ea]">{status.bot.firstName}</p>
                 <p className="text-xs text-[#229ED9]">@{status.bot.username}</p>
-                <p className="text-xs text-[#6b6b7a] mt-0.5">
-                  Connected {status.connectedAt ? formatRelTime(new Date(status.connectedAt).getTime()) : ""}
-                </p>
+                <p className="text-xs text-[#6b6b7a] mt-0.5">Connected {status.connectedAt ? formatRelTime(new Date(status.connectedAt).getTime()) : ""}</p>
               </div>
-              <a
-                href={`https://t.me/${status.bot.username}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#229ED9] hover:bg-[#1a8ec7] text-white text-xs font-medium transition-colors"
-              >
+              <a href={`https://t.me/${status.bot.username}`} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#229ED9] hover:bg-[#1a8ec7] text-white text-xs font-medium transition-colors">
                 Open Bot <ExternalLinkIcon className="size-3" />
               </a>
             </div>
-
-            {/* Stats row */}
             <div className="grid grid-cols-3 divide-x divide-[#1e1e22]">
-              <StatCell
-                icon={<MessageSquareIcon className="size-3.5" />}
-                label="Total messages"
-                value={String(status.activityCount ?? 0)}
-              />
-              <StatCell
-                icon={<ClockIcon className="size-3.5" />}
-                label="Pending updates"
-                value={String(status.pendingUpdates ?? 0)}
-              />
-              <StatCell
-                icon={<ZapIcon className="size-3.5" />}
-                label="Status"
-                value={status.lastError ? "Error" : "Active"}
-                valueClass={status.lastError ? "text-red-400" : "text-emerald-400"}
-              />
+              <StatCell icon={<MessageSquareIcon className="size-3.5" />} label="Messages" value={String(status.activityCount ?? 0)} />
+              <StatCell icon={<ClockIcon className="size-3.5" />} label="Pending" value={String(status.pendingUpdates ?? 0)} />
+              <StatCell icon={<ZapIcon className="size-3.5" />} label="Status" value={status.lastError ? "Error" : "Active"} valueClass={status.lastError ? "text-red-400" : "text-emerald-400"} />
             </div>
-
-            {/* Webhook URL */}
             <div className="p-4 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs text-[#6b6b7a] mb-0.5">Webhook URL</p>
-                <p className="text-xs text-[#e8e8ea] font-mono truncate">
-                  {status.webhookUrl}
-                </p>
+                <p className="text-xs text-[#e8e8ea] font-mono truncate">{status.webhookUrl}</p>
               </div>
-              <button
-                onClick={copyWebhook}
-                className="shrink-0 p-2 rounded-lg hover:bg-[#1e1e22] transition-colors text-[#6b6b7a] hover:text-[#e8e8ea]"
-                title="Copy webhook URL"
-              >
+              <button onClick={copyWebhook} className="shrink-0 p-2 rounded-lg hover:bg-[#1e1e22] transition-colors text-[#6b6b7a] hover:text-[#e8e8ea]">
                 {copied ? <CheckIcon className="size-4 text-emerald-400" /> : <CopyIcon className="size-4" />}
               </button>
             </div>
-
-            {/* Last error (if any) */}
             {status.lastError && (
               <div className="px-4 py-3 flex items-start gap-2 bg-red-500/5">
                 <AlertTriangleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-medium text-red-400">Webhook Error</p>
-                  <p className="text-xs text-red-400/70 mt-0.5">{status.lastError}</p>
-                </div>
+                <p className="text-xs text-red-400/70">{status.lastError}</p>
               </div>
             )}
-
-            {/* Disconnect */}
             <div className="p-4 flex justify-end">
-              <button
-                onClick={handleDisconnect}
-                disabled={disconnecting}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 text-xs transition-colors disabled:opacity-50"
-              >
-                {disconnecting
-                  ? <RefreshCwIcon className="size-3.5 animate-spin" />
-                  : <XCircleIcon className="size-3.5" />
-                }
-                Disconnect
+              <button onClick={handleDisconnect} disabled={disconnecting}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 text-xs transition-colors disabled:opacity-50">
+                {disconnecting ? <RefreshCwIcon className="size-3.5 animate-spin" /> : <XCircleIcon className="size-3.5" />} Disconnect
               </button>
             </div>
           </div>
-
         ) : (
-          /* ── Disconnected state ─────────────────────────────────────────── */
-            <div className="p-6 space-y-6">
-
-            {/* Step-by-step guide */}
+          <div className="p-6 space-y-6">
             <div className="space-y-4">
-              <SetupStep n={1} title="Create a bot with BotFather">
-                <span>Open Telegram → search </span>
-                <a
-                  href="https://t.me/BotFather"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[#229ED9] hover:underline"
-                >
-                  @BotFather
-                </a>
-                <span> → send </span>
-                <code className="px-1.5 py-0.5 rounded bg-[#1e1e22] text-[#00e5cc] text-xs font-mono">/newbot</code>
-                <span> → follow the prompts</span>
-              </SetupStep>
-
-              <SetupStep n={2} title="Copy the bot token">
-                BotFather will reply with a token like{" "}
-                <code className="px-1.5 py-0.5 rounded bg-[#1e1e22] text-[#00e5cc] text-xs font-mono">
-                  1234567890:ABCdefGHIjklMNOpqrSTUVwxyz
-                </code>
-                . Copy it.
-              </SetupStep>
-
-              <SetupStep n={3} title="Paste it here and connect">
-                That's it — VEGA registers the webhook automatically and links this bot to your account only.
-              </SetupStep>
-            </div>
-
-            {/* Token input */}
-            <div className="space-y-3">
-              <label className="text-xs font-medium text-[#e8e8ea]">
-                Bot Token
-              </label>
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <input
-                    type={showToken ? "text" : "password"}
-                    value={token}
-                    onChange={(e) => { setToken(e.target.value); setError(null); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
-                    placeholder="1234567890:ABCdefGHIjklMNOpqrSTUVwxyz"
-                    className="w-full px-3 py-2.5 pr-10 rounded-lg bg-[#1a1a1f] border border-[#2a2a30] text-[#e8e8ea] text-sm font-mono placeholder:text-[#3a3a44] focus:outline-none focus:border-[#229ED9]/50 transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowToken(!showToken)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6b6b7a] hover:text-[#e8e8ea] transition-colors"
-                  >
-                    {showToken ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
-                  </button>
+              {[
+                { n: 1, title: "Create a bot with BotFather", body: <>Open Telegram → search <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[#229ED9] hover:underline">@BotFather</a> → send <code className="px-1.5 py-0.5 rounded bg-[#1e1e22] text-[#00e5cc] text-xs">/newbot</code></> },
+                { n: 2, title: "Copy the bot token", body: "BotFather gives you a token like 1234567890:ABCdef... — copy it." },
+                { n: 3, title: "Paste here and connect", body: "VEGA registers the webhook automatically and links this bot to your account only." },
+              ].map(({ n, title, body }) => (
+                <div key={n} className="flex items-start gap-3">
+                  <div className="flex size-6 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/30 text-xs font-bold text-[#229ED9] shrink-0 mt-0.5">{n}</div>
+                  <div><p className="text-sm font-medium text-[#e8e8ea]">{title}</p><p className="text-xs text-[#6b6b7a] mt-0.5 leading-relaxed">{body}</p></div>
                 </div>
-                <button
-                  onClick={handleConnect}
-                  disabled={connecting || !token.trim()}
-                  className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#229ED9] hover:bg-[#1a8ec7] text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-                >
-                  {connecting
-                    ? <RefreshCwIcon className="size-4 animate-spin" />
-                    : <SendIcon className="size-4" />
-                  }
-                  {connecting ? "Connecting…" : "Connect"}
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <input type={showToken ? "text" : "password"} value={token}
+                  onChange={(e) => { setToken(e.target.value); setError(null); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleConnect(); }}
+                  placeholder="1234567890:ABCdefGHIjklMNOpqrSTUVwxyz"
+                  className="w-full px-3 py-2.5 pr-10 rounded-lg bg-[#1a1a1f] border border-[#2a2a30] text-[#e8e8ea] text-sm font-mono placeholder:text-[#3a3a44] focus:outline-none focus:border-[#229ED9]/50 transition-colors" />
+                <button type="button" onClick={() => setShowToken(!showToken)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6b6b7a] hover:text-[#e8e8ea]">
+                  {showToken ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
                 </button>
               </div>
-
-              {/* Error */}
-              {error && (
-                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
-                  <XCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-xs text-red-400">{error}</p>
-                </div>
-              )}
-
-              {/* Success */}
-              {success && (
-                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-                  <CheckCircleIcon className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <p className="text-xs text-emerald-400">{success}</p>
-                </div>
-              )}
+              <button onClick={handleConnect} disabled={connecting || !token.trim()}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#229ED9] hover:bg-[#1a8ec7] text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+                {connecting ? <RefreshCwIcon className="size-4 animate-spin" /> : <SendIcon className="size-4" />}
+                {connecting ? "Connecting…" : "Connect"}
+              </button>
             </div>
-
-            {/* Privacy note */}
-            <p className="text-xs text-[#4a4a58]">
-              🔒 Your bot token is stored server-side (in the Worker + D1 layer) scoped to your user account and never exposed in the frontend.
-              Webhook requests are verified with a secret so only your configured bot can talk to VEGA.
-            </p>
+            {error && <FeedbackBox type="error" message={error} />}
+            {success && <FeedbackBox type="success" message={success} />}
+            <p className="text-xs text-[#4a4a58]">🔒 Your bot token is stored server-side in D1, scoped to your account only.</p>
           </div>
         )}
       </div>
 
-      {/* ── Activity Feed ─────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {isConnected && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-          >
-            <ActivityFeed activity={activity} onRefresh={onActivityRefresh} />
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}>
+            <ActivityFeed title="Telegram Activity" activity={activity} onRefresh={onActivityRefresh} color="#229ED9"
+              renderItem={(item) => ({ name: (item as TgActivityItem).firstName ?? (item as TgActivityItem).username, sub: `@${(item as TgActivityItem).username}`, msg: (item as TgActivityItem).messagePreview, reply: (item as TgActivityItem).replyPreview, ts: (item as TgActivityItem).ts, badge: undefined })} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -491,83 +348,219 @@ function TelegramSection({
   );
 }
 
-// ─── Activity Feed ────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// WHATSAPP SECTION
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function ActivityFeed({
-  activity,
-  onRefresh,
-}: {
-  activity: ActivityItem[];
-  onRefresh: () => void;
+function WhatsAppSection({ status, activity, onRefresh }: {
+  status: WhatsAppStatus | null; activity: WaActivityItem[]; onRefresh: () => void;
+}) {
+  const [phoneNumberId, setPhoneNumberId] = useState("");
+  const [accessToken, setAccessToken] = useState("");
+  const [wabaId, setWabaId] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const isConnected = status?.connected && status.phoneNumber;
+
+  const handleConnect = async () => {
+    if (!phoneNumberId.trim() || !accessToken.trim()) { setError("Phone Number ID and Access Token are required."); return; }
+    setConnecting(true); setError(null); setSuccess(null);
+    try {
+      const data = await api<{ success: boolean; phoneNumber: string; displayName: string; nextStep: string }>(
+        "POST", "/whatsapp/setup",
+        { phoneNumberId: phoneNumberId.trim(), accessToken: accessToken.trim(), wabaId: wabaId.trim() || undefined }
+      );
+      setSuccess(`✅ Connected: ${data.displayName} (${data.phoneNumber})\n\n${data.nextStep}`);
+      setPhoneNumberId(""); setAccessToken(""); setWabaId(""); onRefresh();
+    } catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setConnecting(false); }
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm("Disconnect this WhatsApp number?")) return;
+    setDisconnecting(true);
+    try { await api("DELETE", "/whatsapp/disconnect"); setSuccess("Disconnected."); onRefresh(); }
+    catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setDisconnecting(false); }
+  };
+
+  const copyWebhook = async () => {
+    if (!status?.webhookUrl) return;
+    await navigator.clipboard.writeText(status.webhookUrl);
+    setCopied(true); setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }} className="space-y-4">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-[#25D366]/10 border border-[#25D366]/20">
+            <svg className="size-4 sm:size-5" viewBox="0 0 24 24" fill="#25D366">
+              <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">WhatsApp Business</h2>
+            <p className="text-[10px] sm:text-xs text-[#6b6b7a]">Chat with VEGA via WhatsApp</p>
+          </div>
+        </div>
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider ${isConnected ? "bg-[#25D366]/10 text-[#25D366] border border-[#25D366]/20" : "bg-[#1e1e22] text-[#6b6b7a] border border-[#2a2a30]"}`}>
+          {isConnected ? <><WifiIcon className="size-3" /> Connected</> : <><WifiOffIcon className="size-3" /> Not connected</>}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden shadow-sm">
+        {isConnected && status ? (
+          <div className="divide-y divide-[#1e1e22]">
+            <div className="p-5 flex items-center gap-4">
+              <div className="flex size-12 items-center justify-center rounded-full bg-[#25D366]/10 border border-[#25D366]/20 text-xl shrink-0">📱</div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-[#e8e8ea]">{status.displayName}</p>
+                <p className="text-xs text-[#25D366]">{status.phoneNumber}</p>
+                <p className="text-xs text-[#6b6b7a] mt-0.5">Connected {status.connectedAt ? formatRelTime(new Date(status.connectedAt).getTime()) : ""}</p>
+              </div>
+              <div className="text-right text-xs text-[#6b6b7a]">
+                <p className="text-lg font-bold text-[#e8e8ea]">{status.activityCount ?? 0}</p>
+                <p className="text-[10px]">messages</p>
+              </div>
+            </div>
+            <div className="p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs text-[#6b6b7a] mb-0.5">Webhook URL — configure in Meta Console</p>
+                <p className="text-xs text-[#e8e8ea] font-mono truncate">{status.webhookUrl}</p>
+              </div>
+              <button onClick={copyWebhook} className="shrink-0 p-2 rounded-lg hover:bg-[#1e1e22] transition-colors text-[#6b6b7a] hover:text-[#e8e8ea]">
+                {copied ? <CheckIcon className="size-4 text-emerald-400" /> : <CopyIcon className="size-4" />}
+              </button>
+            </div>
+            <div className="px-4 py-3 bg-amber-500/5 flex items-start gap-2">
+              <AlertTriangleIcon className="size-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-400/80">
+                Confirm the webhook URL above is set in your{" "}
+                <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener noreferrer" className="underline">Meta App</a>
+                {" "}→ WhatsApp → Configuration. Subscribe field: <strong>messages</strong>.
+              </p>
+            </div>
+            <div className="p-4 flex justify-end">
+              <button onClick={handleDisconnect} disabled={disconnecting}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-red-500/20 text-red-400 hover:bg-red-500/10 text-xs transition-colors disabled:opacity-50">
+                {disconnecting ? <RefreshCwIcon className="size-3.5 animate-spin" /> : <XCircleIcon className="size-3.5" />} Disconnect
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="p-6 space-y-6">
+            <div className="space-y-4">
+              {[
+                { n: 1, title: "Create a Meta App", body: <>Go to <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener noreferrer" className="text-[#25D366] hover:underline">developers.facebook.com</a> → Create App → Business → Add WhatsApp product.</> },
+                { n: 2, title: "Get your Phone Number ID", body: "Meta App → WhatsApp → API Setup. Copy the Phone Number ID (numbers only, not the actual phone number)." },
+                { n: 3, title: "Create a Permanent Token", body: "Meta Business Manager → System Users → Create System User → Generate Token with whatsapp_business_messaging permission." },
+                { n: 4, title: "Configure webhook after connecting", body: <>Set the webhook URL (shown after connect) in Meta App → WhatsApp → Configuration. Verify token = your <code className="text-[10px] px-1 py-0.5 rounded bg-[#1e1e22] text-[#00e5cc]">WHATSAPP_WEBHOOK_VERIFY_TOKEN</code> secret. Subscribe to: messages.</> },
+              ].map(({ n, title, body }) => (
+                <div key={n} className="flex items-start gap-3">
+                  <div className="flex size-6 items-center justify-center rounded-full bg-[#25D366]/10 border border-[#25D366]/30 text-xs font-bold text-[#25D366] shrink-0 mt-0.5">{n}</div>
+                  <div><p className="text-sm font-medium text-[#e8e8ea]">{title}</p><p className="text-xs text-[#6b6b7a] mt-0.5 leading-relaxed">{body}</p></div>
+                </div>
+              ))}
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-[#e8e8ea] block mb-1">Phone Number ID <span className="text-red-400">*</span></label>
+                <input type="text" value={phoneNumberId} onChange={(e) => { setPhoneNumberId(e.target.value); setError(null); }}
+                  placeholder="123456789012345"
+                  className="w-full px-3 py-2.5 rounded-lg bg-[#1a1a1f] border border-[#2a2a30] text-[#e8e8ea] text-sm font-mono placeholder:text-[#3a3a44] focus:outline-none focus:border-[#25D366]/50 transition-colors" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#e8e8ea] block mb-1">Permanent Access Token <span className="text-red-400">*</span></label>
+                <div className="relative">
+                  <input type={showToken ? "text" : "password"} value={accessToken} onChange={(e) => { setAccessToken(e.target.value); setError(null); }}
+                    placeholder="EAAxxxxxxxx..."
+                    className="w-full px-3 py-2.5 pr-10 rounded-lg bg-[#1a1a1f] border border-[#2a2a30] text-[#e8e8ea] text-sm font-mono placeholder:text-[#3a3a44] focus:outline-none focus:border-[#25D366]/50 transition-colors" />
+                  <button type="button" onClick={() => setShowToken(!showToken)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6b6b7a] hover:text-[#e8e8ea]">
+                    {showToken ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#e8e8ea] block mb-1">WABA ID <span className="text-[#6b6b7a]">(optional)</span></label>
+                <input type="text" value={wabaId} onChange={(e) => setWabaId(e.target.value)} placeholder="WhatsApp Business Account ID"
+                  className="w-full px-3 py-2.5 rounded-lg bg-[#1a1a1f] border border-[#2a2a30] text-[#e8e8ea] text-sm font-mono placeholder:text-[#3a3a44] focus:outline-none focus:border-[#25D366]/50 transition-colors" />
+              </div>
+              <button onClick={handleConnect} disabled={connecting || !phoneNumberId.trim() || !accessToken.trim()}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-[#25D366] hover:bg-[#1ebe58] text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                {connecting ? <RefreshCwIcon className="size-4 animate-spin" /> : <PhoneIcon className="size-4" />}
+                {connecting ? "Connecting…" : "Connect WhatsApp Number"}
+              </button>
+              {error && <FeedbackBox type="error" message={error} />}
+              {success && <FeedbackBox type="success" message={success} />}
+            </div>
+            <p className="text-xs text-[#4a4a58]">🔒 Your access token is stored server-side in D1, scoped to your account. Webhooks verified via HMAC using your Meta App Secret.</p>
+          </div>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {isConnected && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}>
+            <ActivityFeed title="WhatsApp Activity" activity={activity} onRefresh={onRefresh} color="#25D366"
+              renderItem={(item) => {
+                const w = item as WaActivityItem;
+                return { name: w.contactName, sub: w.from, msg: w.messagePreview, reply: w.replyPreview, ts: w.ts, badge: w.wasAudio ? "🎙️ voice" : undefined };
+              }} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.section>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SHARED COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function ActivityFeed<T>({ title, activity, onRefresh, color, renderItem }: {
+  title: string; activity: T[]; onRefresh: () => void; color: string;
+  renderItem: (item: T) => { name: string; sub?: string; msg: string; reply: string; ts: number; badge?: string };
 }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-[#e8e8ea]">Recent Activity</h3>
-        <button
-          onClick={onRefresh}
-          className="p-1 rounded hover:bg-[#1e1e22] transition-colors text-[#6b6b7a] hover:text-[#e8e8ea]"
-          title="Refresh"
-        >
-          <RefreshCwIcon className="size-3.5" />
-        </button>
+        <h3 className="text-sm font-medium text-[#e8e8ea]">{title}</h3>
+        <button onClick={onRefresh} className="p-1 rounded hover:bg-[#1e1e22] transition-colors text-[#6b6b7a] hover:text-[#e8e8ea]"><RefreshCwIcon className="size-3.5" /></button>
       </div>
-
-      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden shadow-sm">
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md overflow-hidden">
         {activity.length === 0 ? (
           <div className="py-10 text-center">
             <MessageSquareIcon className="size-8 text-[#2a2a30] mx-auto mb-2" />
             <p className="text-sm text-[#4a4a58]">No messages yet</p>
-            <p className="text-xs text-[#3a3a44] mt-1">
-              Open your bot in Telegram and say hello!
-            </p>
           </div>
         ) : (
           <div className="divide-y divide-[#1e1e22]/60">
-            <AnimatePresence>
-              {activity.map((item, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.05 }}
-                  className="px-4 py-4 hover:bg-[#1a1a1f]/50 transition-colors"
-                >
+            {activity.map((item, i) => {
+              const r = renderItem(item);
+              return (
+                <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04 }} className="px-4 py-4 hover:bg-[#1a1a1f]/50 transition-colors">
                   <div className="flex items-center gap-2 mb-2">
-                    {/* User avatar placeholder */}
-                    <div className="flex size-6 sm:size-7 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/20 text-xs text-[#229ED9] font-bold shrink-0">
-                      {(item.firstName ?? item.username ?? "?")[0].toUpperCase()}
+                    <div className="flex size-6 items-center justify-center rounded-full border text-xs font-bold shrink-0" style={{ backgroundColor: `${color}15`, borderColor: `${color}30`, color }}>
+                      {(r.name ?? "?")[0].toUpperCase()}
                     </div>
-                    <span className="text-xs sm:text-sm font-bold text-[#e8e8ea]">
-                      {item.firstName ?? item.username}
-                    </span>
-                    {item.username && (
-                      <span className="text-[10px] sm:text-xs text-[#4a4a58]">@{item.username}</span>
-                    )}
-                    <span className="ml-auto text-[10px] sm:text-xs text-[#3a3a44] font-mono">
-                      {formatRelTime(item.ts)}
-                    </span>
+                    <span className="text-xs font-bold text-[#e8e8ea]">{r.name}</span>
+                    {r.sub && <span className="text-[10px] text-[#4a4a58]">{r.sub}</span>}
+                    {r.badge && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ backgroundColor: `${color}15`, color }}>{r.badge}</span>}
+                    <span className="ml-auto text-[10px] text-[#3a3a44] font-mono">{formatRelTime(r.ts)}</span>
                   </div>
-
-                  <div className="ml-8 sm:ml-9 space-y-1.5">
-                    <div className="flex items-start gap-2">
-                      <span className="text-[#4a4a58] text-xs shrink-0 mt-0.5 opacity-50">→</span>
-                      <p className="text-xs sm:text-sm text-[#8b8b9a] leading-relaxed truncate">
-                        {item.messagePreview}
-                      </p>
-                    </div>
-                    <div className="flex items-start gap-2">
-                      <div className="size-3 sm:size-4 shrink-0 mt-0.5 flex items-center justify-center">
-                        <BotIcon className="size-2.5 sm:size-3 text-[#00e5cc]" />
-                      </div>
-                      <p className="text-xs sm:text-sm text-[#e8e8ea]/80 leading-relaxed truncate italic">
-                        {item.replyPreview}
-                      </p>
-                    </div>
+                  <div className="ml-8 space-y-1">
+                    <p className="text-xs text-[#8b8b9a] truncate">→ {r.msg}</p>
+                    <p className="text-xs text-[#e8e8ea]/80 truncate italic">⚡ {r.reply}</p>
                   </div>
                 </motion.div>
-              ))}
-            </AnimatePresence>
+              );
+            })}
           </div>
         )}
       </div>
@@ -575,7 +568,24 @@ function ActivityFeed({
   );
 }
 
-// ─── Danger Zone ─────────────────────────────────────────────────────────────
+function FeedbackBox({ type, message }: { type: "error" | "success"; message: string }) {
+  const isError = type === "error";
+  return (
+    <div className={`flex items-start gap-2 px-3 py-2 rounded-lg ${isError ? "bg-red-500/10 border border-red-500/20" : "bg-emerald-500/10 border border-emerald-500/20"}`}>
+      {isError ? <XCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" /> : <CheckCircleIcon className="size-4 text-emerald-400 shrink-0 mt-0.5" />}
+      <p className={`text-xs whitespace-pre-line ${isError ? "text-red-400" : "text-emerald-400"}`}>{message}</p>
+    </div>
+  );
+}
+
+function StatCell({ icon, label, value, valueClass = "text-[#e8e8ea]" }: { icon: React.ReactNode; label: string; value: string; valueClass?: string; }) {
+  return (
+    <div className="px-4 py-3">
+      <div className="flex items-center gap-1.5 text-[#6b6b7a] mb-1">{icon}<span className="text-xs">{label}</span></div>
+      <p className={`text-lg font-bold ${valueClass}`}>{value}</p>
+    </div>
+  );
+}
 
 function DangerZone() {
   const [clearing, setClearing] = useState<string | null>(null);
@@ -584,150 +594,46 @@ function DangerZone() {
   const handleClearMemory = async () => {
     if (!confirm("Clear ALL stored memories? This cannot be undone.")) return;
     setClearing("memory");
-    try {
-      const res = await fetch("/api/memory", { method: "DELETE" });
-      if (!res.ok) throw new Error(await res.text());
-      setDone("memory");
-      setTimeout(() => setDone(null), 3000);
-    } catch (e) {
-      alert(`Failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setClearing(null);
-    }
+    try { const res = await fetch("/api/memory", { method: "DELETE" }); if (!res.ok) throw new Error(await res.text()); setDone("memory"); setTimeout(() => setDone(null), 3000); }
+    catch (e) { alert(`Failed: ${e instanceof Error ? e.message : String(e)}`); }
+    finally { setClearing(null); }
   };
 
   const handleClearHistory = async () => {
-    if (!confirm("Clear all conversation history? Sessions will still exist but messages will be gone.")) return;
-    // For now, just clear localStorage sessions
+    if (!confirm("Clear all conversation history?")) return;
     localStorage.removeItem("vega-sessions");
-    setDone("history");
-    setTimeout(() => setDone(null), 3000);
+    setDone("history"); setTimeout(() => setDone(null), 3000);
   };
 
   return (
-    <motion.section
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.2 }}
-      className="space-y-4"
-    >
+    <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="space-y-4">
       <div className="flex items-center gap-2">
         <AlertTriangleIcon className="size-4 sm:size-5 text-red-400" />
         <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">Danger Zone</h2>
       </div>
-
-      <div className="rounded-xl border border-red-500/20 bg-[#111113]/80 backdrop-blur-md divide-y divide-red-500/10 overflow-hidden shadow-[0_0_15px_rgba(239,68,68,0.05)]">
-        <DangerRow
-          title="Clear all memory"
-          description="Permanently delete all key-value memories stored in Redis."
-          buttonLabel="Clear Memory"
-          busy={clearing === "memory"}
-          done={done === "memory"}
-          onAction={handleClearMemory}
-        />
-        <DangerRow
-          title="Clear conversation history"
-          description="Remove all chat session history from this browser."
-          buttonLabel="Clear History"
-          busy={clearing === "history"}
-          done={done === "history"}
-          onAction={handleClearHistory}
-        />
+      <div className="rounded-xl border border-red-500/20 bg-[#111113]/80 backdrop-blur-md divide-y divide-red-500/10 overflow-hidden">
+        {[
+          { id: "memory", title: "Clear all memory", desc: "Permanently delete all key-value memories stored in Redis.", label: "Clear Memory", action: handleClearMemory },
+          { id: "history", title: "Clear conversation history", desc: "Remove all chat session history from this browser.", label: "Clear History", action: handleClearHistory },
+        ].map(({ id, title, desc, label, action }) => (
+          <div key={id} className="flex items-center justify-between gap-4 p-4">
+            <div><p className="text-sm font-medium text-[#e8e8ea]">{title}</p><p className="text-xs text-[#6b6b7a] mt-0.5">{desc}</p></div>
+            <button onClick={action} disabled={clearing === id}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 text-xs font-medium transition-colors shrink-0 disabled:opacity-50">
+              {done === id ? <CheckCircleIcon className="size-3.5 text-emerald-400" /> : clearing === id ? <RefreshCwIcon className="size-3.5 animate-spin" /> : <Trash2Icon className="size-3.5" />}
+              {done === id ? "Done!" : clearing === id ? "Working…" : label}
+            </button>
+          </div>
+        ))}
       </div>
     </motion.section>
   );
 }
 
-// ─── Small reusable components ────────────────────────────────────────────────
-
-function SetupStep({
-  n,
-  title,
-  children,
-}: {
-  n: number;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-start gap-3">
-      <div className="flex size-6 items-center justify-center rounded-full bg-[#229ED9]/10 border border-[#229ED9]/30 text-xs font-bold text-[#229ED9] shrink-0 mt-0.5">
-        {n}
-      </div>
-      <div>
-        <p className="text-sm font-medium text-[#e8e8ea]">{title}</p>
-        <p className="text-xs text-[#6b6b7a] mt-0.5 leading-relaxed">{children}</p>
-      </div>
-    </div>
-  );
-}
-
-function StatCell({
-  icon,
-  label,
-  value,
-  valueClass = "text-[#e8e8ea]",
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  valueClass?: string;
-}) {
-  return (
-    <div className="px-4 py-3">
-      <div className="flex items-center gap-1.5 text-[#6b6b7a] mb-1">
-        {icon}
-        <span className="text-xs">{label}</span>
-      </div>
-      <p className={`text-lg font-bold ${valueClass}`}>{value}</p>
-    </div>
-  );
-}
-
-function DangerRow({
-  title,
-  description,
-  buttonLabel,
-  busy,
-  done,
-  onAction,
-}: {
-  title: string;
-  description: string;
-  buttonLabel: string;
-  busy: boolean;
-  done: boolean;
-  onAction: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 p-4">
-      <div>
-        <p className="text-sm font-medium text-[#e8e8ea]">{title}</p>
-        <p className="text-xs text-[#6b6b7a] mt-0.5">{description}</p>
-      </div>
-      <button
-        onClick={onAction}
-        disabled={busy}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 text-xs font-medium transition-colors shrink-0 disabled:opacity-50"
-      >
-        {done
-          ? <CheckCircleIcon className="size-3.5 text-emerald-400" />
-          : busy
-            ? <RefreshCwIcon className="size-3.5 animate-spin" />
-            : <Trash2Icon className="size-3.5" />
-        }
-        {done ? "Done!" : busy ? "Working…" : buttonLabel}
-      </button>
-    </div>
-  );
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function formatRelTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
+  const d = Date.now() - ts;
+  if (d < 60_000) return `${Math.floor(d / 1000)}s ago`;
+  if (d < 3_600_000) return `${Math.floor(d / 60_000)}m ago`;
+  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
+  return `${Math.floor(d / 86_400_000)}d ago`;
 }

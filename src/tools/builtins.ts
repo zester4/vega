@@ -77,6 +77,7 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import type { RegisteredTool } from "../memory";
 import { execLocalFsTool } from "./local-fs";
+import { MESH_TOOL_DECLARATIONS, execMeshTool } from "../agent-mesh";
 
 // ─── Tool Declarations (Gemini sees these) ────────────────────────────────────
 
@@ -834,6 +835,8 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  ...MESH_TOOL_DECLARATIONS,
+
 ] as const;
 
 // ─── Type Helpers ─────────────────────────────────────────────────────────────
@@ -938,6 +941,14 @@ export async function executeTool(
       // Web Scraping
       case "firecrawl": return await execFirecrawlTool(args, env);
 
+      // ── Agent Mesh (Peer-to-Peer) — Dispatch to agent-mesh.ts ──────────────
+      case "message_agent":
+      case "read_agent_messages":
+      case "wait_for_agents":
+      case "broadcast_to_agents":
+      case "get_mesh_topology":
+        return await execMeshTool(toolName, args, env);
+
       default: return await execDynamicTool(toolName, args, env);
     }
   } catch (e) {
@@ -1025,24 +1036,24 @@ Return ONLY valid JSON, no other text.`,
 
 // ── Serper endpoint map ───────────────────────────────────────────────────────
 const SERPER_ENDPOINTS: Record<string, string> = {
-  search:       "https://google.serper.dev/search",
-  news:         "https://google.serper.dev/news",
-  images:       "https://google.serper.dev/images",
-  videos:       "https://google.serper.dev/videos",
-  shopping:     "https://google.serper.dev/shopping",
-  scholar:      "https://google.serper.dev/scholar",
-  places:       "https://google.serper.dev/places",
-  patents:      "https://google.serper.dev/patents",
+  search: "https://google.serper.dev/search",
+  news: "https://google.serper.dev/news",
+  images: "https://google.serper.dev/images",
+  videos: "https://google.serper.dev/videos",
+  shopping: "https://google.serper.dev/shopping",
+  scholar: "https://google.serper.dev/scholar",
+  places: "https://google.serper.dev/places",
+  patents: "https://google.serper.dev/patents",
   autocomplete: "https://google.serper.dev/autocomplete",
 };
 
 // ── Time range → Serper tbs param ─────────────────────────────────────────────
 const TIME_RANGE_MAP: Record<string, string> = {
-  hour:  "qdr:h",
-  day:   "qdr:d",
-  week:  "qdr:w",
+  hour: "qdr:h",
+  day: "qdr:d",
+  week: "qdr:w",
   month: "qdr:m",
-  year:  "qdr:y",
+  year: "qdr:y",
 };
 
 async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
@@ -1078,7 +1089,7 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
       num: numResults,
     };
     if (timeRange && TIME_RANGE_MAP[timeRange]) body.tbs = TIME_RANGE_MAP[timeRange];
-    if (country)  body.gl = country.toLowerCase();
+    if (country) body.gl = country.toLowerCase();
     if (language) body.hl = language.toLowerCase();
     if (location) body.location = location;
 
@@ -1147,15 +1158,15 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const images = (serperData.images as unknown[] ?? []).slice(0, numResults).map((img) => {
       const i = img as Record<string, unknown>;
       return {
-        title:        String(i.title ?? ""),
-        imageUrl:     i.imageUrl,
+        title: String(i.title ?? ""),
+        imageUrl: i.imageUrl,
         thumbnailUrl: i.thumbnailUrl,
-        source:       i.source ?? null,
-        domain:       i.domain ?? null,
-        link:         i.link,
-        width:        i.imageWidth ?? null,
-        height:       i.imageHeight ?? null,
-        position:     i.position,
+        source: i.source ?? null,
+        domain: i.domain ?? null,
+        link: i.link,
+        width: i.imageWidth ?? null,
+        height: i.imageHeight ?? null,
+        position: i.position,
       };
     });
     return { ...output, images, count: images.length };
@@ -1165,13 +1176,13 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const videos = (serperData.videos as unknown[] ?? []).slice(0, numResults).map((v) => {
       const item = v as Record<string, unknown>;
       return {
-        title:    String(item.title ?? ""),
-        url:      item.link,
-        snippet:  item.snippet ?? null,
+        title: String(item.title ?? ""),
+        url: item.link,
+        snippet: item.snippet ?? null,
         duration: item.duration ?? null,
-        source:   item.source ?? null,
-        channel:  item.channel ?? null,
-        date:     item.date ?? null,
+        source: item.source ?? null,
+        channel: item.channel ?? null,
+        date: item.date ?? null,
         imageUrl: item.imageUrl ?? null,
         position: item.position,
       };
@@ -1183,16 +1194,16 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const shopping = (serperData.shopping as unknown[] ?? []).slice(0, numResults).map((p) => {
       const item = p as Record<string, unknown>;
       return {
-        title:       String(item.title ?? ""),
-        url:         item.link,
-        source:      item.source ?? null,
-        price:       item.price ?? null,
-        delivery:    item.delivery ?? null,
-        rating:      item.rating ?? null,
+        title: String(item.title ?? ""),
+        url: item.link,
+        source: item.source ?? null,
+        price: item.price ?? null,
+        delivery: item.delivery ?? null,
+        rating: item.rating ?? null,
         ratingCount: item.ratingCount ?? null,
-        offers:      item.offers ?? null,
-        imageUrl:    item.imageUrl ?? null,
-        position:    item.position,
+        offers: item.offers ?? null,
+        imageUrl: item.imageUrl ?? null,
+        position: item.position,
       };
     });
     return { ...output, shopping, count: shopping.length };
@@ -1202,18 +1213,18 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const places = (serperData.places as unknown[] ?? []).slice(0, numResults).map((p) => {
       const item = p as Record<string, unknown>;
       return {
-        title:       String(item.title ?? ""),
-        address:     item.address ?? null,
-        phone:       item.phoneNumber ?? null,
-        website:     item.website ?? null,
-        rating:      item.rating ?? null,
+        title: String(item.title ?? ""),
+        address: item.address ?? null,
+        phone: item.phoneNumber ?? null,
+        website: item.website ?? null,
+        rating: item.rating ?? null,
         ratingCount: item.ratingCount ?? null,
-        type:        item.type ?? null,
+        type: item.type ?? null,
         description: item.description ?? null,
-        latitude:    item.latitude ?? null,
-        longitude:   item.longitude ?? null,
-        cid:         item.cid ?? null,
-        position:    item.position,
+        latitude: item.latitude ?? null,
+        longitude: item.longitude ?? null,
+        cid: item.cid ?? null,
+        position: item.position,
       };
     });
     return { ...output, places, count: places.length };
@@ -1223,13 +1234,13 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const papers = (serperData.organic as unknown[] ?? []).slice(0, numResults).map((p) => {
       const item = p as Record<string, unknown>;
       return {
-        title:           String(item.title ?? ""),
-        url:             item.link,
-        snippet:         item.snippet ?? null,
+        title: String(item.title ?? ""),
+        url: item.link,
+        snippet: item.snippet ?? null,
         publicationInfo: item.publicationInfo ?? null,
-        year:            item.year ?? null,
-        citedBy:         item.citedBy ?? null,
-        position:        item.position,
+        year: item.year ?? null,
+        citedBy: item.citedBy ?? null,
+        position: item.position,
       };
     });
     return { ...output, papers, count: papers.length };
@@ -1239,16 +1250,16 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     const patents = (serperData.organic as unknown[] ?? []).slice(0, numResults).map((p) => {
       const item = p as Record<string, unknown>;
       return {
-        title:             String(item.title ?? ""),
-        url:               item.link,
-        snippet:           item.snippet ?? null,
-        inventor:          item.inventor ?? null,
-        assignee:          item.assignee ?? null,
+        title: String(item.title ?? ""),
+        url: item.link,
+        snippet: item.snippet ?? null,
+        inventor: item.inventor ?? null,
+        assignee: item.assignee ?? null,
         publicationNumber: item.publicationNumber ?? null,
-        filingDate:        item.filingDate ?? null,
-        grantDate:         item.grantDate ?? null,
-        thumbnailUrl:      item.thumbnailUrl ?? null,
-        position:          item.position,
+        filingDate: item.filingDate ?? null,
+        grantDate: item.grantDate ?? null,
+        thumbnailUrl: item.thumbnailUrl ?? null,
+        position: item.position,
       };
     });
     return { ...output, patents, count: patents.length };
@@ -1259,15 +1270,15 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
   const results = organicRaw.map((r) => {
     const item = r as Record<string, unknown>;
     return {
-      title:     String(item.title ?? ""),
-      snippet:   String(item.snippet ?? ""),
-      url:       String(item.link ?? ""),
-      date:      item.date ? String(item.date) : undefined,
-      source:    item.source ?? undefined,         // for news results
-      imageUrl:  item.imageUrl ?? undefined,       // for news results
+      title: String(item.title ?? ""),
+      snippet: String(item.snippet ?? ""),
+      url: String(item.link ?? ""),
+      date: item.date ? String(item.date) : undefined,
+      source: item.source ?? undefined,         // for news results
+      imageUrl: item.imageUrl ?? undefined,       // for news results
       sitelinks: item.sitelinks ?? undefined,
       attributes: item.attributes ?? undefined,
-      position:  item.position,
+      position: item.position,
     };
   });
 
@@ -1288,11 +1299,11 @@ async function execWebSearch(args: ToolArgs, env: Env): Promise<Record<string, u
     (r) => (typeof r === "object" ? (r as Record<string, unknown>).query : r)
   );
 
-  output.results      = results;
-  output.count        = results.length;
-  if (topStories.length > 0) output.topStories      = topStories;
-  if (paa.length > 0)        output.peopleAlsoAsk   = paa;
-  if (related.length > 0)    output.relatedSearches = related;
+  output.results = results;
+  output.count = results.length;
+  if (topStories.length > 0) output.topStories = topStories;
+  if (paa.length > 0) output.peopleAlsoAsk = paa;
+  if (related.length > 0) output.relatedSearches = related;
 
   // ── Deep mode: fetch full text of top 3 organic results ───────────────────
   if (depth === "deep" && results.length > 0) {
@@ -1644,14 +1655,14 @@ async function execReadFile(args: ToolArgs, env: Env): Promise<Record<string, un
   }
 
   const contentType = obj.httpMetadata?.contentType ?? "text/plain";
-  
+
   // If it's a non-text file (PDF or Image), use Gemini to "read" it accurately
   if (contentType.includes("pdf") || contentType.includes("image/")) {
     try {
       const bytes = await obj.arrayBuffer();
       const { uploadToGemini, analyzeDocument } = await import("../gemini");
       const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, contentType, path);
-      
+
       const analysis = await analyzeDocument(
         env.GEMINI_API_KEY,
         "Extract all text, data, and describe the structure and visual elements of this document accurately.",
@@ -1729,7 +1740,7 @@ async function execAnalyzeDocument(args: ToolArgs, env: Env): Promise<Record<str
     const bytes = await obj.arrayBuffer();
     const { uploadToGemini, analyzeDocument } = await import("../gemini");
     const { fileUri } = await uploadToGemini(env.GEMINI_API_KEY, bytes, contentType, path);
-    
+
     const analysis = await analyzeDocument(
       env.GEMINI_API_KEY,
       prompt,
@@ -1967,7 +1978,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string
   if (!workerBase) {
     console.warn(`[execSpawnAgent] UPSTASH_WORKFLOW_URL not set — cannot dispatch sub-agent ${agentId}`);
     const { updateTask } = await import("../memory");
-    await updateTask(redis, agentId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => {});
+    await updateTask(redis, agentId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => { });
     return { success: false, error: "UPSTASH_WORKFLOW_URL is not configured — cannot dispatch sub-agent." };
   }
 
@@ -2037,7 +2048,7 @@ async function execSpawnAgent(args: ToolArgs, env: Env, callerSessionId?: string
     const errorMsg = `Workflow dispatch failed: ${String(e)}`;
     await redis.set(`agent:config:${agentId}`, JSON.stringify({ ...agentRecord, status: "error", error: errorMsg }), { ex: 60 * 60 * 24 * 30 });
     const { updateTask } = await import("../memory");
-    await updateTask(redis, agentId, { status: "error", result: { error: errorMsg, failedAt: new Date().toISOString() } }).catch(() => {});
+    await updateTask(redis, agentId, { status: "error", result: { error: errorMsg, failedAt: new Date().toISOString() } }).catch(() => { });
   }
 
   return {
@@ -2184,7 +2195,7 @@ export async function execInvokeAgent(args: ToolArgs, env: Env, callerSessionId?
   // Trigger the Upstash Workflow — QStash will deliver it to /workflow and
   // run each agentic iteration as a separate context.run() step.
   if (!workerBase) {
-    await updateTask(redis, invokeTaskId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => {});
+    await updateTask(redis, invokeTaskId, { status: "error", result: { error: "UPSTASH_WORKFLOW_URL not configured", failedAt: new Date().toISOString() } }).catch(() => { });
     return { success: false, error: "UPSTASH_WORKFLOW_URL is not configured — cannot dispatch agent invocation." };
   }
 
@@ -2200,7 +2211,7 @@ export async function execInvokeAgent(args: ToolArgs, env: Env, callerSessionId?
     console.log(`[execInvokeAgent] ${invokeTaskId} dispatched to /workflow (workflowRunId: ${workflowRunId})`);
   } catch (e) {
     console.error(`[execInvokeAgent] Workflow trigger failed for ${invokeTaskId}:`, String(e));
-    await updateTask(redis, invokeTaskId, { status: "error", result: { error: String(e), failedAt: new Date().toISOString() } }).catch(() => {});
+    await updateTask(redis, invokeTaskId, { status: "error", result: { error: String(e), failedAt: new Date().toISOString() } }).catch(() => { });
   }
 
   return {
@@ -2585,11 +2596,11 @@ async function execSetupHeartbeat(args: ToolArgs, env: Env): Promise<Record<stri
     const redis = getRedis(env);
     const schedules = await listSchedules(redis);
     const existing = schedules.find(s => s.description.includes("Heartbeat") || s.url?.includes("/cron/tick"));
-    
+
     if (existing) {
-      return { 
-        success: true, 
-        status: "active", 
+      return {
+        success: true,
+        status: "active",
         message: "System heartbeat already exists.",
         scheduleId: existing.scheduleId,
         cron: existing.cron
