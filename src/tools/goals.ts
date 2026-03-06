@@ -157,15 +157,14 @@ export async function sendProactiveTelegramMessage(
   try {
     let botToken: string | null = null;
 
-    // Primary: look up per-user bot config from D1
+    // Primary: per-user D1 config
     if (userId && env.DB) {
       const { getTelegramConfigByUserId } = await import("../telegram");
       const config = await getTelegramConfigByUserId(env, userId);
       if (config?.token) botToken = config.token;
     }
 
-    // Fallback: check Redis for any registered bot token
-    // (supports single-user setups where userId isn't known)
+    // Fallback: global Redis token
     if (!botToken) {
       const { getRedis } = await import("../memory");
       const redis = getRedis(env);
@@ -178,26 +177,152 @@ export async function sendProactiveTelegramMessage(
       return false;
     }
 
-    const text = message.slice(0, 4096);
-    const res = await fetch(
-      `https://api.telegram.org/bot${botToken}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text,
-          parse_mode: "HTML",
-          disable_web_page_preview: true,
-        }),
-      }
-    );
+    // ── Media detection ────────────────────────────────────────────────────
+    // Match any URL pointing to /files/<r2-key> with a media extension
+    const MEDIA_REGEX = /https?:\/\/[^\s)<>"]+\/files\/([^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp|wav|mp3|ogg|mp4))/gi;
+    const AUDIO_EXTS = new Set([".wav", ".mp3", ".ogg"]);
+    const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4"]);
 
-    const result = await res.json() as { ok: boolean; description?: string };
-    if (!result.ok) {
-      console.error("[proactive_notify] Telegram API error:", result.description);
+    const audioKeys: string[] = [];
+    const imageKeys: string[] = [];
+    const allUrls: string[] = [];
+
+    let match;
+    while ((match = MEDIA_REGEX.exec(message)) !== null) {
+      const r2Key = decodeURIComponent(match[1]);
+      const url = match[0];
+      const ext = r2Key.slice(r2Key.lastIndexOf(".")).toLowerCase();
+
+      allUrls.push(url);
+      if (AUDIO_EXTS.has(ext)) audioKeys.push(r2Key);
+      else if (IMAGE_EXTS.has(ext)) imageKeys.push(r2Key);
     }
-    return result.ok;
+
+    // Strip all media URLs + their markdown containers from the text
+    let cleanMessage = message;
+    for (const url of allUrls) {
+      const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      cleanMessage = cleanMessage
+        .replace(new RegExp(`!\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")  // ![alt](url)
+        .replace(new RegExp(`\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")   // [text](url)
+        .replace(new RegExp(escaped, "gi"), "");                           // bare url
+    }
+    cleanMessage = cleanMessage.replace(/\n{3,}/g, "\n\n").trim();
+
+    const text = cleanMessage.slice(0, 4096);
+
+    // ── 1. Send text (if anything left after stripping media) ──────────────
+    if (text) {
+      const textRes = await fetch(
+        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          }),
+        }
+      );
+      const textResult = await textRes.json() as { ok: boolean; description?: string };
+      if (!textResult.ok) {
+        console.error("[proactive_notify] Text send failed:", textResult.description);
+        // Try without HTML parse mode
+        const plainRes = await fetch(
+          `https://api.telegram.org/bot${botToken}/sendMessage`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text }),
+          }
+        );
+        const plainResult = await plainRes.json() as { ok: boolean };
+        if (!plainResult.ok) return false;
+      }
+    }
+
+    // ── 2. Send audio files directly from R2 ──────────────────────────────
+    for (const r2Key of audioKeys) {
+      try {
+        const bucket = (env as unknown as { FILES_BUCKET?: R2Bucket }).FILES_BUCKET;
+        if (!bucket) {
+          console.warn("[proactive_notify] FILES_BUCKET not bound, cannot send audio");
+          break;
+        }
+        const obj = await bucket.get(r2Key);
+        if (!obj) {
+          console.warn("[proactive_notify] Audio not found in R2:", r2Key);
+          continue;
+        }
+
+        const audioBytes = new Uint8Array(await obj.arrayBuffer());
+        const ext = r2Key.slice(r2Key.lastIndexOf(".") + 1).toLowerCase();
+        const mime = ext === "mp3" ? "audio/mpeg"
+          : ext === "ogg" ? "audio/ogg"
+            : "audio/wav";
+        const filename = r2Key.split("/").pop() ?? "voice.wav";
+
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        form.append("voice", new Blob([audioBytes], { type: mime }), filename);
+
+        const res = await fetch(`https://api.telegram.org/bot${botToken}/sendVoice`, {
+          method: "POST",
+          body: form,
+        });
+        const result = await res.json() as { ok: boolean; description?: string };
+        if (!result.ok) {
+          console.warn("[proactive_notify] sendVoice failed:", result.description);
+        }
+      } catch (e) {
+        console.error("[proactive_notify] Audio send failed:", r2Key, String(e));
+      }
+    }
+
+    // ── 3. Send image files directly from R2 ──────────────────────────────
+    for (const r2Key of imageKeys) {
+      try {
+        const bucket = (env as unknown as { FILES_BUCKET?: R2Bucket }).FILES_BUCKET;
+        if (!bucket) {
+          console.warn("[proactive_notify] FILES_BUCKET not bound, cannot send image");
+          break;
+        }
+        const obj = await bucket.get(r2Key);
+        if (!obj) {
+          console.warn("[proactive_notify] Image not found in R2:", r2Key);
+          continue;
+        }
+
+        const imageBytes = new Uint8Array(await obj.arrayBuffer());
+        const ext = r2Key.slice(r2Key.lastIndexOf(".") + 1).toLowerCase();
+        const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+          : ext === "gif" ? "image/gif"
+            : ext === "webp" ? "image/webp"
+              : "image/png";
+        const filename = r2Key.split("/").pop() ?? `image.${ext}`;
+
+        // Telegram's sendPhoto has a 10MB limit — use sendDocument for larger files
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        const method = imageBytes.length > 10 * 1024 * 1024 ? "sendDocument" : "sendPhoto";
+        form.append(method === "sendPhoto" ? "photo" : "document", new Blob([imageBytes], { type: mime }), filename);
+
+        const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+          method: "POST",
+          body: form,
+        });
+        const result = await res.json() as { ok: boolean; description?: string };
+        if (!result.ok) {
+          console.warn(`[proactive_notify] ${method} failed:`, result.description);
+        }
+      } catch (e) {
+        console.error("[proactive_notify] Image send failed:", r2Key, String(e));
+      }
+    }
+
+    return true;
   } catch (err) {
     console.error("[sendProactiveTelegramMessage] Failed:", err);
     return false;

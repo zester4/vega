@@ -1056,7 +1056,7 @@ async function processMessage(
     if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
 
     // ── Capture generated image URLs from text ───────────────────────────────────
-    const imageRegex = /https?:\/\/[^\s)]+\/files\/generated\/[^\s)]+\.(?:png|jpg|jpeg)/gi;
+    const imageRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp)/gi;
     let imgMatch;
     while ((imgMatch = imageRegex.exec(reply)) !== null) {
         const url = imgMatch[0];
@@ -1085,7 +1085,7 @@ async function processMessage(
 
     // ── Detect audio URLs ─────────────────────────────────────────────────────────
     const audioUrls: string[] = [];
-    const audioRegex = /https?:\/\/[^\s)]+\/files\/voice\/[^\s)]+\.wav/gi;
+    const audioRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:wav|mp3|ogg)/gi;
     let audioMatch;
     while ((audioMatch = audioRegex.exec(reply)) !== null) {
         audioUrls.push(audioMatch[0]);
@@ -1148,20 +1148,33 @@ async function processMessage(
         }
     }
 
-    // ── Send audio attachments (Fetch-then-Push: never pass URL to Telegram directly) ──
+    // ── Send audio attachments (R2 direct read — no HTTP self-call) ──────────────
     if (audioUrls.length > 0) {
         await Promise.all(audioUrls.map(async (audioUrl) => {
             try {
                 await bot.sendChatAction(chatId, "upload_document");
-                // Fetch the audio bytes from our own R2/Worker endpoint
-                const audioRes = await fetch(audioUrl);
-                // If 404: file may not exist yet (async TTS still generating).
-                // The completion-callback will send it when ready — skip here.
-                if (!audioRes.ok) {
-                    console.warn(`[Telegram Audio] Skipping ${audioUrl} — status ${audioRes.status}`);
-                    return;
+                // Extract R2 key from URL (everything after /files/)
+                const r2KeyMatch = audioUrl.match(/\/files\/(.+)$/);
+                const r2Key = r2KeyMatch?.[1] ? decodeURIComponent(r2KeyMatch[1]) : null;
+                let audioBytes: Uint8Array | null = null;
+
+                // Direct R2 read — no HTTP roundtrip
+                if (r2Key && (env as any).FILES_BUCKET) {
+                    const obj = await (env as any).FILES_BUCKET.get(r2Key);
+                    if (obj) {
+                        audioBytes = new Uint8Array(await obj.arrayBuffer());
+                    } else {
+                        console.warn(`[Telegram Audio] Not found in R2: ${r2Key}`);
+                    }
+                } else {
+                    // Fallback: HTTP fetch if R2 key extraction fails
+                    const audioRes = await fetch(audioUrl);
+                    if (audioRes.ok) {
+                        audioBytes = new Uint8Array(await audioRes.arrayBuffer());
+                    }
                 }
-                const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
+
+                if (!audioBytes) return;
                 await bot.sendVoice(chatId, audioBytes, {
                     reply_to_message_id: msg.message_id,
                     caption: buildVoiceCaption(),
@@ -1172,14 +1185,31 @@ async function processMessage(
         }));
     }
 
-    // ── Send generated images ─────────────────────────────────────────────────────
+    // ── Send generated images (R2 direct read — no HTTP self-call) ───────────────
     if (generatedImages.length > 0) {
         await Promise.all(generatedImages.map(async (img) => {
             try {
                 await bot.sendChatAction(chatId, "upload_photo");
-                const imgRes = await fetch(img.url);
-                if (!imgRes.ok) throw new Error(`Fetch status ${imgRes.status}`);
-                const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
+                // Extract R2 key from URL (everything after /files/)
+                const r2KeyMatch = img.url.match(/\/files\/(.+)$/);
+                const r2Key = r2KeyMatch?.[1] ? decodeURIComponent(r2KeyMatch[1]) : null;
+                let imageBytes: Uint8Array | null = null;
+
+                // Direct R2 read — no HTTP roundtrip
+                if (r2Key && (env as any).FILES_BUCKET) {
+                    const obj = await (env as any).FILES_BUCKET.get(r2Key);
+                    if (obj) {
+                        imageBytes = new Uint8Array(await obj.arrayBuffer());
+                    } else {
+                        console.warn(`[Telegram Image] Not found in R2: ${r2Key}`);
+                    }
+                } else {
+                    // Fallback: HTTP fetch
+                    const imgRes = await fetch(img.url);
+                    if (imgRes.ok) imageBytes = new Uint8Array(await imgRes.arrayBuffer());
+                }
+
+                if (!imageBytes) return;
                 const caption = buildImageCaption(img.description, img.mimeType);
                 await bot.sendPhoto(chatId, imageBytes, caption);
             } catch (imgErr) {

@@ -61,7 +61,7 @@ export async function handleCompletionCallback(
     payload: CompletionCallbackPayload,
     env: Env
 ): Promise<void> {
-    const { taskId, agentName, parentSessionId, userId: explicitUserId, status, result, completedAt } = payload;
+    const { taskId, agentName, parentSessionId, userId: explicitUserId, memoryPrefix, status, result, completedAt } = payload;
 
     console.log(`[CompletionCallback] ${taskId} (${agentName}) → session: ${parentSessionId ?? "none"}, user: ${explicitUserId ?? "none"}, status: ${status}`);
 
@@ -125,11 +125,12 @@ export async function handleCompletionCallback(
             const injectedMessage = {
                 role: "user",
                 parts: [{
-                    text: `[Background agent '${agentName}' completed — task ID: ${taskId}]\n` +
-                        `Status: ${status} | Completed: ${completedAt}\n\n` +
+                    text:
+                        `[Background agent '${agentName}' (task: ${taskId}) completed.\n` +
+                        `Status: ${status} | At: ${completedAt}\n\n` +
                         `Result:\n${result.slice(0, 3000)}` +
                         (result.length > 3000
-                            ? `\n\n[Output truncated. Full result at memory key: agent:shared:${payload.memoryPrefix}:result — use read_agent_memory('${payload.memoryPrefix}', 'result') to retrieve it.]`
+                            ? `\n\n[Output truncated. Full result: read_agent_memory('${memoryPrefix}', 'result')]`
                             : ""),
                 }],
             };
@@ -153,7 +154,7 @@ export async function handleCompletionCallback(
     }
 
     // ── 5. Push via Telegram (if connected) ────────────────────────────────────
-    await pushViaTelegram(env, redis, finalUserId, pushMessage, taskId, agentName).catch((e) =>
+    await pushViaTelegram(env, redis, finalUserId, pushMessage, taskId, agentName, memoryPrefix).catch((e) =>
         console.warn(`[CompletionCallback] Telegram push failed: ${String(e)}`)
     );
 
@@ -171,62 +172,62 @@ async function pushViaTelegram(
     userId: string,
     message: string,
     taskId: string,
-    agentName: string
+    agentName: string,
+    memoryPrefix: string
 ): Promise<void> {
-    // Look up the user's Telegram config from D1
     const db = (env as { DB?: D1Database }).DB;
     if (!db) return;
 
     const { getTelegramConfigByUserId } = await import("../db/queries");
     const tgConfig = await getTelegramConfigByUserId(db, userId).catch(() => null);
-    if (!tgConfig?.token) {
-        console.log(`[CompletionCallback] No Telegram config for user ${userId}`);
-        return;
-    }
+    if (!tgConfig?.token) return;
 
-    // Find the most recent chat ID for this user's bot
-    // We store activity as: { chatId, username, ... } in Redis
     const activityKey = `tg:activity:${userId}`;
     const recent = await redis.lrange(activityKey, 0, 0) as string[];
-    if (!recent.length) {
-        console.log(`[CompletionCallback] No recent Telegram chat for user ${userId}`);
-        return;
-    }
+    if (!recent.length) return;
 
     let chatId: number | null = null;
     try {
-        const item = JSON.parse(recent[0]) as { chatId: number };
-        chatId = item.chatId;
+        chatId = (JSON.parse(recent[0]) as { chatId: number }).chatId;
     } catch { return; }
-
     if (!chatId) return;
 
-    // Convert markdown → Telegram HTML
     const { markdownToHtml: markdownToTelegramHtml, TelegramBot } = await import("../telegram");
+    const bot = new TelegramBot(tgConfig.token);
 
-    // Detect audio and image URLs in the completion message (e.g. from a sub-agent podcast or designer tool)
-    const audioUrls: string[] = [];
-    const imageUrls: string[] = [];
-    const audioRegex = /https?:\/\/[^\s)]+\/files\/voice\/[^\s)]+\.wav/gi;
-    const imageRegex = /https?:\/\/[^\s)]+\/files\/generated\/[^\s)]+\.(?:png|jpg|jpeg)/gi;
+    // ── Detect media URLs broadly (any /files/ path with a media extension) ──
+    const MEDIA_REGEX = /https?:\/\/[^\s)<>"]+\/files\/([^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp|wav|mp3|ogg|mp4))/gi;
+    const audioExts = new Set([".wav", ".mp3", ".ogg"]);
+    const imageExts = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+    const audioFiles: string[] = [];   // R2 keys
+    const imageFiles: string[] = [];   // R2 keys
 
     let match;
-    while ((match = audioRegex.exec(message)) !== null) audioUrls.push(match[0]);
-    while ((match = imageRegex.exec(message)) !== null) imageUrls.push(match[0]);
+    while ((match = MEDIA_REGEX.exec(message)) !== null) {
+        const r2Key = match[1];  // path after /files/
+        const ext = r2Key.slice(r2Key.lastIndexOf(".")).toLowerCase();
+        if (audioExts.has(ext)) audioFiles.push(r2Key);
+        else if (imageExts.has(ext)) imageFiles.push(r2Key);
+    }
 
-    // Clean the message by removing media URLs and their Markdown containers
+    // Strip all media URLs and their markdown wrappers from the text message
     let cleanMessage = message;
-    for (const url of [...audioUrls, ...imageUrls]) {
-        const mdRegex = new RegExp(`!\\[[^\\]]*\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "gi");
-        cleanMessage = cleanMessage.replace(mdRegex, "");
-        cleanMessage = cleanMessage.replace(url, "");
+    const allMediaRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp|wav|mp3|ogg|mp4)/gi;
+    const foundUrls: string[] = [];
+    let urlMatch;
+    while ((urlMatch = allMediaRegex.exec(message)) !== null) foundUrls.push(urlMatch[0]);
+    for (const url of foundUrls) {
+        const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        cleanMessage = cleanMessage
+            .replace(new RegExp(`!\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")
+            .replace(new RegExp(`\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")
+            .replace(new RegExp(escaped, "gi"), "");
     }
     cleanMessage = cleanMessage.replace(/\n{3,}/g, "\n\n").trim();
 
+    // Send text (if anything left)
     const htmlMessage = markdownToTelegramHtml(cleanMessage);
-    const bot = new TelegramBot(tgConfig.token);
-
-    // 1. Send text message (if anything left after removing media links)
     if (htmlMessage.trim()) {
         const sendRes = await fetch(
             `https://api.telegram.org/bot${tgConfig.token}/sendMessage`,
@@ -241,44 +242,59 @@ async function pushViaTelegram(
                 }),
             }
         );
-
         if (!sendRes.ok) {
             const err = await sendRes.json() as { description?: string };
             console.warn(`[CompletionCallback] Telegram text send failed: ${err.description}`);
         }
     }
 
-    // 2. Send detected audio files as voice messages (Fetch-then-Push: fetch bytes, not URL)
-    if (audioUrls.length > 0) {
-        for (const audioUrl of audioUrls) {
-            try {
-                const audioRes = await fetch(audioUrl);
-                if (!audioRes.ok) throw new Error(`Fetch status ${audioRes.status}`);
-                const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
-                await bot.sendVoice(chatId, audioBytes, {
-                    caption: `🔊 ${agentName} Audio`,
-                });
-            } catch (aErr) {
-                console.warn(`[CompletionCallback] Telegram voice send failed: ${String(aErr)}`);
+    // Send audio files — read directly from R2, no HTTP self-call
+    for (const r2Key of audioFiles) {
+        try {
+            const obj = env.FILES_BUCKET ? await (env.FILES_BUCKET as R2Bucket).get(r2Key) : null;
+            if (!obj) {
+                console.warn(`[CompletionCallback] Audio not found in R2: ${r2Key}`);
+                continue;
             }
+            const audioBytes = new Uint8Array(await obj.arrayBuffer());
+            await bot.sendVoice(chatId, audioBytes, { caption: `🔊 ${agentName}` });
+        } catch (e) {
+            console.warn(`[CompletionCallback] Audio send failed for ${r2Key}:`, String(e));
         }
     }
 
-    // 3. Send detected image files as photos
-    if (imageUrls.length > 0) {
-        for (const imageUrl of imageUrls) {
-            try {
-                const imgRes = await fetch(imageUrl);
-                if (!imgRes.ok) throw new Error(`Fetch status ${imgRes.status}`);
-                const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
-                await bot.sendPhoto(chatId, imageBytes, `🎨 ${agentName} Image`);
-            } catch (imgErr) {
-                console.warn(`[CompletionCallback] Telegram photo send failed: ${String(imgErr)}`);
+    // Send image files — read directly from R2, no HTTP self-call
+    for (const r2Key of imageFiles) {
+        try {
+            const obj = env.FILES_BUCKET ? await (env.FILES_BUCKET as R2Bucket).get(r2Key) : null;
+            if (!obj) {
+                console.warn(`[CompletionCallback] Image not found in R2: ${r2Key}`);
+                continue;
             }
+            const imageBytes = new Uint8Array(await obj.arrayBuffer());
+            const ext = r2Key.slice(r2Key.lastIndexOf(".") + 1).toLowerCase();
+            const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+                : ext === "gif" ? "image/gif"
+                    : ext === "webp" ? "image/webp"
+                        : "image/png";
+            const form = new FormData();
+            form.append("chat_id", String(chatId));
+            form.append("photo", new Blob([imageBytes], { type: mime }), `image.${ext}`);
+            form.append("caption", `🎨 ${agentName}`);
+            const res = await fetch(
+                `https://api.telegram.org/bot${tgConfig.token}/sendPhoto`,
+                { method: "POST", body: form }
+            );
+            if (!res.ok) {
+                const err = await res.json() as { description?: string };
+                console.warn(`[CompletionCallback] Photo send failed: ${err.description}`);
+            }
+        } catch (e) {
+            console.warn(`[CompletionCallback] Image send failed for ${r2Key}:`, String(e));
         }
     }
 
-    console.log(`[CompletionCallback] ✅ Pushed to Telegram chat ${chatId} for user ${userId}`);
+    console.log(`[CompletionCallback] ✅ Pushed to Telegram chat ${chatId} for user ${userId} (audio: ${audioFiles.length}, images: ${imageFiles.length})`);
 }
 
 // ─── WhatsApp Push ────────────────────────────────────────────────────────────
