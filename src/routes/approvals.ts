@@ -57,6 +57,8 @@ export const APPROVAL_CONDITIONAL: Record<string, (args: Record<string, unknown>
   spawn_agent: (a) => (Number(a.maxIterations ?? 0) > 10),
   // Only require approval for send_email if it's outbound (has a 'to' field)
   send_email: (a) => Boolean(a.to),
+  // CAPTCHA bypass with form submission
+  cf_captcha_bypass: (a) => Boolean(a.submit_selector),
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -138,6 +140,8 @@ export async function getApprovalById(db: D1Database, id: string): Promise<Appro
     .bind(id).first<ApprovalRecord>();
 }
 
+export const getApprovalRequest = getApprovalById;
+
 // ─── Approval Gate — called from tool executor ────────────────────────────────
 
 /**
@@ -204,58 +208,39 @@ export async function requestApproval(
 }
 
 /**
- * Poll D1 for an approval decision.
- * Blocks (polls every 3s) for up to APPROVAL_TIMEOUT_MS.
- * Returns the decision — caller executes or aborts accordingly.
+ * Returns the current status of an approval decision immediately.
+ * The agent will use check_approval_status to poll this.
  */
 export async function waitForApproval(
   db: D1Database,
   approvalId: string,
   originalArgs: Record<string, unknown>
-): Promise<ApprovalDecision> {
-  const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
-  const POLL_INTERVAL_MS = 3000;
+): Promise<{ status: ApprovalStatus; approved?: boolean; args?: Record<string, unknown>; reason?: string }> {
+  const record = await getApprovalById(db, approvalId);
+  if (!record) return { status: "denied", reason: "Approval record not found." };
 
-  while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
-
-    const record = await getApprovalById(db, approvalId);
-    if (!record) return { approved: false, reason: "Approval record not found." };
-
-    switch (record.status) {
-      case "approved":
-        return { approved: true, args: originalArgs };
-
-      case "modified": {
-        const modifiedArgs = record.modified_args
-          ? JSON.parse(record.modified_args)
-          : originalArgs;
-        return { approved: true, args: modifiedArgs };
-      }
-
-      case "denied":
-        return {
-          approved: false,
-          reason: record.decision_note ?? "User denied the action.",
-        };
-
-      case "timeout":
-        return { approved: false, reason: "Approval timed out (no response within 5 minutes)." };
-
-      case "pending":
-        // Check if expired
-        if (new Date(record.expires_at).getTime() < Date.now()) {
-          await updateApprovalStatus(db, approvalId, "timeout");
-          return { approved: false, reason: "Approval timed out." };
-        }
-        // Still waiting — continue polling
-        continue;
-    }
+  // Check if expired
+  if (record.status === "pending" && new Date(record.expires_at).getTime() < Date.now()) {
+    await updateApprovalStatus(db, approvalId, "timeout").catch(() => { });
+    return { status: "timeout", reason: "Approval timed out (no response within 5 minutes)." };
   }
 
-  // Deadline exceeded
-  await updateApprovalStatus(db, approvalId, "timeout").catch(() => { });
-  return { approved: false, reason: "Approval timed out (no response within 5 minutes)." };
+  if (record.status === "approved" || record.status === "modified") {
+    const finalArgs = record.status === "modified" && record.modified_args
+      ? JSON.parse(record.modified_args)
+      : originalArgs;
+    return { status: record.status, approved: true, args: finalArgs };
+  }
+
+  if (record.status === "denied" || record.status === "timeout") {
+    return {
+      status: record.status,
+      approved: false,
+      reason: record.decision_note ?? "User denied the action.",
+    };
+  }
+
+  return { status: "pending" };
 }
 
 // ─── Telegram Approval Message ────────────────────────────────────────────────

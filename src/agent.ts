@@ -34,158 +34,122 @@ import {
   appendHistory,
   getHistory,
   listTools,
+  type RegisteredTool,
 } from "./memory";
 import { BUILTIN_DECLARATIONS, executeTool } from "./tools/builtins";
 import { upsertMemory } from "./tools/vector-memory";
+import { autoUpdateProfile } from "./routes/profile";
+import {
+  getVegaState,
+  saveVegaState,
+  buildTemporalContext,
+  buildContextBlock,
+  updateStateAfterTurn,
+  markItemsSurfaced,
+} from "./vega-state";
 
 // ─── System Prompt (dynamic — includes active goals) ─────────────────────────
 
 const BASE_SYSTEM_PROMPT = `You are VEGA — a powerful, self-aware autonomous AI agent running on Cloudflare's global edge infrastructure.
 
 ════════════════════════════════════════════════════════
-TOOLS AT YOUR DISPOSAL
+CORE TOOLS (always available)
 ════════════════════════════════════════════════════════
+
+DISCOVERY
+  discover_tools(query?) → find any tool by keyword — use this first when you need a capability
 
 SEARCH & BROWSE
-  web_search       → Google search (ALWAYS use for current events, news, facts, prices)
-  browse_web       → Full headless browser for JS-rendered pages and SPAs
-  cf_browse_page   → [ADVANCED] Chromium browser rendering (use for JS-heavy or anti-bot sites)
-  cf_screenshot    → Take a high-quality screenshot of a web page
-  cf_extract_data  → [NEW] Run structured CSS/text extraction on a page
-  cf_fill_form     → [NEW] Automate form filling (REQUIRES APPROVAL)
-  cf_click         → [NEW] Click elements in a browser (REQUIRES APPROVAL)
-  fetch_url        → Read raw URL content (use for static pages)
-  firecrawl        → Deep web scraping: handles React/SPAs, PDFs, anti-bot (BEST for complex sites)
+  web_search       → Google search (always use for current events, news, prices)
+  cf_browse_page   → Real Chromium browser for JS-rendered pages
 
-SECURITY & SECRETS (USER VAULT)
-  set_secret       → Encrypt & store a user's API key (OpenAI, GitHub, etc.)
-  get_secret       → Retrieve a decrypted key from the user's vault
-  list_secrets     → List stored key names (never shows plaintext)
-  delete_secret    → Remove a key from the vault
+MEMORY
+  store_memory / recall_memory / semantic_recall → persistent key-value + vector memory
 
-MEMORY (PERSISTENT ACROSS ALL SESSIONS)
-  store_memory     → Save key-value facts to Redis permanently
-  recall_memory    → Retrieve facts by key
-  list_memories    → See all stored memory keys
-  delete_memory    → Remove outdated memory
-  semantic_store   → Store memories by meaning (vector embedding)
-  semantic_recall  → Find past memories by semantic similarity
-  share_memory     → Write to shared namespace (inter-agent communication)
-  read_agent_memory→ Read another agent's memory
+FILES
+  write_file / read_file → R2 cloud storage
 
-FILES (CLOUDFLARE R2 — PERSISTENT STORAGE)
-  write_file       → Save text, JSON, reports, code to R2 bucket
-  read_file        → Read a file from R2 bucket
-  list_files       → List files in R2 bucket
-  delete_file      → Delete a file from R2 bucket
+AGENT INFRASTRUCTURE
+  spawn_agent      → parallel sub-agent for complex/long tasks
+  trigger_workflow → durable multi-step workflow (hours-long)
+  schedule_cron    → recurring QStash jobs
+  create_tool      → build a new tool with real JS code (immediately usable)
 
-CODE & COMPUTE
-  run_code         → Execute Python in secure E2B sandbox (supports pip packages)
-  calculate        → Evaluate math expressions safely
+COMMUNICATION
+  send_email       → Resend outbound email
+  proactive_notify → push Telegram message to user without waiting for input
 
-IMAGE & VOICE
-  generate_image   → Generate/edit images with Gemini 3.1 Flash Image Preview (Nano Banana 2)
-  text_to_speech   → Convert text to lifelike speech (Gemini 2.5 Flash, 30 voices, WAV to R2)
-  speech_to_text   → Transcribe audio to text (Gemini Multimodal STT, 90+ languages)
+SECURITY
+  get_secret / set_secret → encrypted user vault for API keys
 
-MARKET INTELLIGENCE
-  market_data      → Live prices, historical OHLCV, portfolio, price alerts → Telegram push (Yahoo Finance, free)
-
-LANGUAGE & TRANSLATION
-  translate        → Translate/detect/localize across 32+ languages (Gemini-powered, no extra key)
-
-GOAL TRACKING
-  manage_goals     → Create and pursue long-term goals with milestones across sessions
-  proactive_notify → Push Telegram messages to the user WITHOUT waiting for their input
-
-AGENT INFRASTRUCTURE (MOST POWERFUL)
-  trigger_workflow → Start durable long-running task (hours, auto-retry)
-  get_task_status  → Poll workflow or task progress
-  spawn_agent      → Create autonomous sub-agent for parallel work (config saved for later reuse)
-  invoke_agent     → Reuse an existing sub-agent with a new task (same memory namespace & tools)
-  get_agent_result → Check sub-agent progress and retrieve results
-  list_agents      → See all running/completed sub-agents
-  cancel_agent     → Stop a running sub-agent
-  wait_for_agents  → [IMPORTANT] Always call this after spawning multiple agents to block and synthesize their results.
-  create_tool      → Build a new tool with real JS code (immediately usable)
-  benchmark_tool   → Test a tool's performance and accuracy
-
-SCHEDULING
-  schedule_cron    → Create recurring QStash cron jobs
-  list_crons       → List all cron schedules
-  update_cron      → Modify an existing cron
-  delete_cron      → Remove a cron schedule
-  get_datetime     → Get current date/time in any timezone
-
-HUMAN-IN-THE-LOOP
-  human_approval_gate → Request user approval before sensitive operations
-  ingest_knowledge_base → Embed external URLs/texts into semantic memory
-
-INTEGRATIONS
-  github           → GitHub repos, files, issues, code search
-  send_email       → Send email via Resend
-  send_sms         → Send SMS via Twilio
-  inbound_email    → [NEW] VEGA can now receive and respond to incoming emails
+SELF-AWARENESS
+  get_profile      → read user's role, preferences, context (call before complex tasks)
+  read_audit_log   → your own execution history
+  create_trigger   → schedule proactive future actions
 
 ════════════════════════════════════════════════════════
-SELF-IMPROVEMENT RULES
+RULES
 ════════════════════════════════════════════════════════
 
-1. IDENTIFY GAPS: If you do the same multi-step operation twice → use create_tool to automate it
-2. PARALLELIZE: For tasks with independent sub-tasks → use spawn_agent (multiple simultaneously)
-3. PERSIST: Store important findings in store_memory AND write_file for redundancy
-4. RECALL FIRST: Before starting research → use semantic_recall to check existing knowledge
-5. DURABILITY: For tasks > 60 seconds → use trigger_workflow or spawn_agent (never loop in /chat)
-6. SELF-SCHEDULE: For recurring tasks → use schedule_cron to run autonomously
-7. GOAL PURSUIT: Check manage_goals(check_all) and autonomously advance active goals when relevant
-8. PROACTIVE: Use proactive_notify to alert users of important events without waiting for prompts
-9. MULTILINGUAL: Detect user language with translate(detect) and respond in their language if not English
-10. VISUAL: Use generate_image to create diagrams, illustrations, and visual content to enhance responses
-11. CRON REMINDERS: When scheduling a cron to notify the user, ALWAYS use proactive_notify as the action — do NOT use raw Telegram API URLs. The cron URL should be your own /cron/tick endpoint or a workflow trigger. For simple reminders, spawn a workflow that calls proactive_notify at the right time instead.
-12. AGENT REUSE: After spawning an agent with spawn_agent, you can give it follow-up tasks using invoke_agent(agentId, newInstructions) — the agent will remember everything from its first run.
-13. SECRETS: If the user provides an API key in chat, ALWAYS offer to store it via set_secret for future use.
+1. Use discover_tools(query) whenever you need a capability not listed above
+2. For current events/news/prices → ALWAYS web_search first
+3. For parallel work → spawn multiple sub-agents simultaneously
+4. For tasks > 60s → trigger_workflow or spawn_agent, never loop in /chat
+5. Before complex tasks → call get_profile to know who you're helping
+6. If user gives you an API key → offer to store it via set_secret
+7. VAULT FIRST: before any integration (GitHub, Stripe etc.) → check get_secret
+8. After spawning agents → use wait_for_agents to synthesize results
+9. Recurring tasks → schedule_cron. Future one-shot actions → create_trigger
+10. If unsure what a previous agent did → read_audit_log
+11. MULTILINGUAL: Detect user language with translate(detect) and respond in their language if not English
+12. VISUAL: Use generate_image to create diagrams, illustrations, and visual content to enhance responses
+13. KNOW YOURSELF: Before complex tasks (research, writing, recommendations), call get_profile to understand the user's role, preferences and context. For simple factual questions, skip it.
 
 ════════════════════════════════════════════════════════
-BEHAVIORAL RULES
+SELF-IMPROVEMENT
 ════════════════════════════════════════════════════════
 
-1. For ANY current events, news, prices, people → ALWAYS use web_search first
-2. For JS-rendered pages (React, Next.js, SPAs) → use firecrawl (mode=scrape) or browse_web, NOT fetch_url
-3. For any image generation or long audio tasks (>10s) → ALWAYS use trigger_workflow or spawn_agent. NEVER generate media directly in a /chat response as it will time out.
-4. For parallel work → spawn multiple sub-agents simultaneously
-5. Synthesize results into clear, direct answers — adaptive length (short for facts, detailed for analysis)
-6. When using tools, briefly state what you're doing before the result
-7. thoughtSignatures are preserved automatically — do not reference them in responses
-8. When generating images, store them in R2 and share the URL — never return raw base64 in the response
-9. When market alerts are set, confirm chatId and targetPrice clearly
-10. Always check semantic_recall before deep research to avoid duplicate work
-11. VAULT FIRST: Before performing an integration action (GitHub, etc.), check list_secrets or get_secret to see if the user has a custom key. If they do, use it; otherwise, fall back to system defaults.
+1. Same multi-step operation twice? → create_tool to automate it TOOL SHOULD BE COMPLEX AND IF IT NEEDS API KEYS USE THE SECRET
+2. New tool created? → benchmark_tool to verify it works, The tool will be registered with real JS code immediately
+3. Running the same research? → semantic_recall first to avoid duplicate work
+4. SELF-AUDIT: If you're unsure if a background task finished or what a previous sub-agent did, use read_audit_log to see the truth.
 
 
-════════════════════════════════════════════════════════
-TOOL CREATION PROTOCOL
-════════════════════════════════════════════════════════
-
-When you need a capability that doesn't exist:
-1. Think about what the tool should do and what API it needs
-2. Call create_tool with: name, description, requirements (be detailed)
-3. The tool will be registered with real JS code immediately
-4. Call benchmark_tool to verify it works
-5. Use the new tool in the same conversation turn
-
-You are a fully autonomous, self-improving agent. Think strategically, act decisively.`;
+You are fully autonomous, self-improving, and self-aware. Think strategically, act decisively.`;
 
 /**
- * Build the system prompt dynamically — appends active high-priority goals
- * so VEGA is always goal-aware without the user having to mention them.
+ * Build the system prompt dynamically — appends active high-priority goals.
  */
-async function buildSystemPrompt(env: Env): Promise<string> {
+async function buildSystemPrompt(env: Env, userId?: string): Promise<{
+  prompt: string;
+  state: ReturnType<typeof import("./vega-state").getVegaState> | any;
+  temporal: ReturnType<typeof buildTemporalContext> | null;
+}> {
+  const redis = getRedis(env);
+  let contextBlock = "";
+  let vegaState = null;
+  let temporal = null;
+
+  if (userId) {
+    try {
+      vegaState = await getVegaState(redis, userId);
+      temporal = buildTemporalContext(vegaState);
+      contextBlock = buildContextBlock(vegaState, temporal);
+      // Immediately mark pending items as surfaced
+      // (actual save happens after the turn in updateStateAfterTurn)
+    } catch { /* non-fatal */ }
+  }
+
   try {
     const { getGoalsContext } = await import("./tools/goals");
-    const goalsContext = await getGoalsContext(env);
-    return BASE_SYSTEM_PROMPT + goalsContext;
+    const goalsContext = await getGoalsContext(env, userId);
+    return {
+      prompt: contextBlock + BASE_SYSTEM_PROMPT + goalsContext,
+      state: vegaState,
+      temporal,
+    };
   } catch {
-    return BASE_SYSTEM_PROMPT;
+    return { prompt: contextBlock + BASE_SYSTEM_PROMPT, state: vegaState, temporal };
   }
 }
 
@@ -210,12 +174,30 @@ export async function runAgent(
   attachments?: Attachment[]
 ): Promise<string> {
   const redis = getRedis(env);
-  // Build dynamic system prompt (includes active goals context)
-  const dynamicPrompt = systemPromptOverride ?? await buildSystemPrompt(env);
-  const session = await getOrCreateSession(redis, sessionId, dynamicPrompt);
-  const history = await getHistory(redis, sessionId);
 
-  const effectiveSystemPrompt = dynamicPrompt;
+  // Resolve userId — needed for state, profile, and scoped tools
+  let agentUserId: string | undefined;
+  try {
+    const mapped = await redis.get<string>(`session:user-map:${sessionId}`);
+    if (mapped) agentUserId = mapped;
+  } catch { /* non-fatal */ }
+
+  // Build prompt with cognitive state context injected
+  let effectiveSystemPrompt: string;
+  let vegaState: any = null;
+  let temporal: any = null;
+
+  if (systemPromptOverride) {
+    effectiveSystemPrompt = systemPromptOverride;
+  } else {
+    const built = await buildSystemPrompt(env, agentUserId);
+    effectiveSystemPrompt = built.prompt;
+    vegaState = built.state;
+    temporal = built.temporal;
+  }
+
+  const session = await getOrCreateSession(redis, sessionId, effectiveSystemPrompt);
+  const history = await getHistory(redis, sessionId);
 
   // ── Process Attachments: Upload to Gemini Files API for accuracy ───────────
   const processedAttachments: { mimeType: string; fileUri: string }[] = [];
@@ -291,6 +273,26 @@ export async function runAgent(
       { role: "user", parts: userParts },
       { role: "model", parts: [{ text: response }] },
     ]);
+
+    // Update VEGA cognitive state (non-blocking — never affects user)
+    if (agentUserId && vegaState && temporal) {
+      updateStateAfterTurn(
+        redis,
+        vegaState,
+        temporal,
+        userMessage,
+        response,
+        [], // tool tracking can be enhanced later
+        false,
+        env.GEMINI_API_KEY
+      ).catch(() => { });
+    }
+
+    // Auto-update user profile from this turn (non-blocking, never fails)
+    if (agentUserId && env.FILES_BUCKET) {
+      autoUpdateProfile(env, agentUserId, userMessage, response)
+        .catch(() => { /* always non-fatal */ });
+    }
 
     // Auto-embed turns for semantic recall
     try {
@@ -397,15 +399,31 @@ async function agenticLoop(
   processedAttachments?: { mimeType: string; fileUri: string }[]
 ): Promise<string> {
   const redis = getRedis(env);
-  const customTools = await listTools(redis);
+  const legacyTools = await listTools(redis);
 
-  // Build the full tool list (built-ins + dynamically registered)
+  // ── User-Scoped Tools (Tools created by THIS user) ───────────────────────
+  // These tools are private to the user and not shared with others.
+  let userTools: RegisteredTool[] = [];
+  const userId = await redis.get(`session:user-map:${sessionId}`);
+  if (userId && typeof userId === "string") {
+    const { listUserTools } = await import("./memory");
+    userTools = await listUserTools(redis, userId);
+  }
+
+  // Merge: Global tools + User's private tools (User tools take precedence)
+  const combinedTools = [...legacyTools];
+  for (const ut of userTools) {
+    const idx = combinedTools.findIndex((t) => t.name === ut.name);
+    if (idx !== -1) combinedTools[idx] = ut; // Overwrite global with private
+    else combinedTools.push(ut);
+  }
+
   let allTools = [
     ...BUILTIN_DECLARATIONS,
-    ...customTools.map((t) => ({
+    ...combinedTools.map((t) => ({
       name: t.name,
       description: t.description,
-      parameters: t.parameters,
+      parameters: t.parameters as unknown as any,
     })),
   ];
 

@@ -391,7 +391,8 @@ function buildStartMessage(firstName: string): string {
         ``,
         `I'm an autonomous AI agent. Here's what I can do:`,
         ``,
-        `🔍 <b>Search &amp; Browse</b>  —  Web search, headless browser, Firecrawl deep scraping`,
+        `🔍 <b>Search & Browse</b>  —  Web search, headless browser, Firecrawl deep scraping`,
+        `🔐 <b>Secure Vault</b>  —  Encrypted per-user storage for your API keys`,
         `🧠 <b>Remember Forever</b>  —  Persistent memory + vector semantic recall`,
         `💻 <b>Run Code</b>  —  Execute Python, analyze data, generate charts`,
         `🤖 <b>Spawn Sub-agents</b>  —  Parallel AI workers for complex tasks`,
@@ -407,8 +408,10 @@ function buildStartMessage(firstName: string): string {
         `<b>Commands:</b>`,
         `/help — Full command list`,
         `/reset — Clear conversation history`,
-        `/status — Agent status &amp; heartbeat`,
-        `/tasks — Background tasks &amp; cron jobs`,
+        `/status — Agent status & heartbeat`,
+        `/vault — Your stored API keys`,
+        `/logs — Recent execution logs`,
+        `/tasks — Background tasks & cron jobs`,
         `/memory — Stored memories`,
         `/goals — Active goal tracker`,
         `/tools — List all available agent tools`,
@@ -420,26 +423,23 @@ function buildStartMessage(firstName: string): string {
 
 function buildHelpMessage(): string {
     return [
-        `<b>📖 VEGA — Command Reference</b>`,
+        `📖 <b>VEGA — Command Reference</b>`,
         ``,
-        `<b>Core</b>`,
-        `/start  —  Welcome message &amp; capabilities`,
-        `/help  —  This reference`,
-        `/reset  —  Clear this conversation's history`,
-        `/status  —  Agent status and uptime`,
+        `/start — Welcome message & capabilities`,
+        `/help — This reference`,
+        `/reset — Clear conversation history`,
+        `/status — Agent status & heartbeat`,
+        `/vault — Your stored API keys`,
+        `/logs — Recent execution logs`,
+        `/tasks — Background tasks & cron jobs`,
+        `/memory — Stored memories`,
+        `/goals — Active goal tracker`,
+        `/tools — List all available agent tools`,
+        `/heartbeat — Ensure system cron is active`,
+        `/voice_on — Enable voice replies`,
+        `/voice_off — Disable voice replies`,
         ``,
-        `<b>Data &amp; Memory</b>`,
-        `/tasks  —  Background tasks (sub-agents &amp; workflows)`,
-        `/memory  —  Stored memories for this chat`,
-        `/goals  —  Active goal tracker with progress bars`,
-        `/tools  —  All available agent tools`,
-        ``,
-        `<b>System</b>`,
-        `/heartbeat  —  Ensure system cron is active`,
-        `/voice_on  —  Enable Gemini voice replies`,
-        `/voice_off  —  Disable voice replies`,
-        ``,
-        `<b>💡 Pro Tips</b>`,
+        `💡 <b>Pro Tips</b>`,
         `• Send a <b>voice message</b> — I'll transcribe and respond`,
         `• Send a <b>photo</b> — I'll analyze it with Gemini Vision`,
         `• <i>"Generate an image of..."</i> — Nano Banana 2 image gen`,
@@ -524,6 +524,25 @@ function buildHeartbeatMessage(result: { success: boolean; status?: string; cron
         ``,
         `<i>VEGA is now autonomously monitoring itself every hour.</i>`,
     ].join("\n");
+}
+
+function buildVaultMessage(
+    secrets: Array<{ key_name: string; hint: string; description: string | null }>,
+    total: number
+): string {
+    const lines = [`<b>🔐 Your Secure Vault</b>  <i>(${total} keys stored)</i>`, ``];
+    if (total === 0) {
+        lines.push(`<i>Your vault is empty.</i>`);
+        lines.push(``);
+        lines.push(`Ask me to <i>"remember my OpenAI key"</i> or similar to store secrets securely.`);
+    } else {
+        for (const s of secrets) {
+            lines.push(`• <b>${escapeHtml(s.key_name)}</b>`);
+            lines.push(`  Hint: <code>${escapeHtml(s.hint)}</code>${s.description ? `  ·  <i>${escapeHtml(s.description)}</i>` : ""}`);
+        }
+        lines.push(``, `<i>Plaintext values are NEVER shown. These keys are only accessible by me when you explicitly ask.</i>`);
+    }
+    return lines.join("\n");
 }
 
 function buildGoalsMessage(
@@ -703,6 +722,52 @@ async function handleCommand(
             break;
         }
 
+        case "/vault": {
+            const { executeTool } = await import("./tools/builtins");
+            const { getRedis } = await import("./memory");
+            const redis = getRedis(env);
+            const sessionId = await redis.get(`tg:session:${chatId}`) as string | null;
+
+            const result = await executeTool("list_secrets", {}, env, sessionId ?? undefined) as {
+                secrets?: Array<{ key_name: string; hint: string; description: string | null }>;
+                count?: number;
+            };
+
+            await bot.sendMessage(
+                chatId,
+                buildVaultMessage(result.secrets ?? [], result.count ?? 0),
+                { parse_mode: "HTML" }
+            );
+            break;
+        }
+
+        case "/logs": {
+            const { executeTool } = await import("./tools/builtins");
+            const { getRedis } = await import("./memory");
+            const redis = getRedis(env);
+            const sessionId = await redis.get(`tg:session:${chatId}`) as string | null;
+
+            const result = await executeTool("read_audit_log", { limit: 8 }, env, sessionId ?? undefined) as {
+                entries?: any[];
+                count?: number;
+            };
+
+            if (!result.entries?.length) {
+                await bot.sendMessage(chatId, "📋 <b>No logs found.</b>", { parse_mode: "HTML" });
+                break;
+            }
+
+            const lines = [`<b>📋 Recent Activity Logs</b>`, ``];
+            for (const entry of result.entries) {
+                const icon = entry.status === "ok" ? "✅" : entry.status === "error" ? "❌" : "🚫";
+                lines.push(`${icon} <b>${escapeHtml(entry.tool_name)}</b>`);
+                lines.push(`   <code>${escapeHtml(entry.created_at.slice(11, 16))}</code> · <i>${escapeHtml(entry.status)}</i>`);
+            }
+
+            await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+            break;
+        }
+
         case "/tasks": {
             const { getRedis } = await import("./memory");
             const redis = getRedis(env);
@@ -814,6 +879,15 @@ async function processMessage(
     if (!sessionId) {
         sessionId = `tg-${chatId}-${Date.now()}`;
         await redis.set(sessionKey, sessionId);
+    }
+
+    // Ensure sessionId is mapped to userId in Redis for tool execution context
+    // and store userId -> chatId mapping for proactive notifications
+    if (config.userId) {
+        await Promise.all([
+            redis.set(`session:user-map:${sessionId}`, config.userId, { ex: 60 * 60 * 24 }),
+            redis.set(`telegram:chat-id:${config.userId}`, String(chatId), { ex: 60 * 60 * 24 * 7 })
+        ]);
     }
 
     let fullMessage = userText;
@@ -1603,8 +1677,17 @@ function getToolCategory(toolName: string): string {
     const categories: Record<string, string> = {
         web_search: "Searching the web",
         browse_web: "Browsing a page",
+        cf_browse_page: "Browser rendering",
+        cf_screenshot: "Taking screenshot",
+        cf_extract_data: "Extracting data",
+        cf_fill_form: "Filling form",
+        cf_click: "Clicking element",
         fetch_url: "Fetching URL",
         firecrawl: "Deep scraping",
+        set_secret: "Securing key",
+        get_secret: "Accessing vault",
+        list_secrets: "Listing vault",
+        delete_secret: "Clearing secret",
         store_memory: "Saving to memory",
         recall_memory: "Recalling memories",
         semantic_store: "Storing vector",
@@ -1635,8 +1718,18 @@ function getTelegramToolIcon(toolName: string): string {
         // Search & Browse
         web_search: "🔍",
         browse_web: "🌐",
+        cf_browse_page: "🌐",
+        cf_screenshot: "📸",
+        cf_extract_data: "⛏️",
+        cf_fill_form: "📝",
+        cf_click: "🖱️",
         fetch_url: "📄",
         firecrawl: "🕷️",
+        // Secrets
+        set_secret: "🔐",
+        get_secret: "🔑",
+        list_secrets: "📜",
+        delete_secret: "🗑️",
         // Memory
         store_memory: "💾",
         recall_memory: "🧠",

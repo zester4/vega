@@ -30,7 +30,7 @@ import { serve } from "@upstash/workflow/cloudflare";
 import { Client as QStashClient, Receiver } from "@upstash/qstash";
 import { runAgent, type ToolEvent } from "./agent";
 import { BUILTIN_DECLARATIONS } from "./tools/builtins";
-import { getRedis, getTask, updateTask, listTasks, listSchedules, listTools } from "./memory";
+import { getRedis, getTask, updateTask, listTasks, listSchedules, listTools, listUserTools, type RegisteredTool } from "./memory";
 import { workflowHandler } from "./routes/workflow";
 import type { WorkflowPayload } from "./routes/workflow";
 import { runSubAgentTask } from "./routes/subagent";
@@ -57,6 +57,8 @@ import {
   type WhatsAppWebhookPayload,
 } from "./whatsapp";
 import { handleCompletionCallback } from "./routes/completion-callback";
+import triggersRouter, { evaluateAllTriggers } from "./routes/triggers";
+import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "./routes/triggers";
 
 // ─── NEW IMPORTS FOR 5 FEATURES ───────────────────────────────────────────────
 import vaultRoutes from "./routes/vault";
@@ -629,9 +631,22 @@ app.get("/notifications", async (c) => {
 app.get("/tools/v1/registry", async (c) => {
   try {
     const redis = getRedis(c.env);
-    const customTools = await listTools(redis);
 
-    // Merge built-in and custom tools with enhanced metadata
+    // ── Resolve userId (Optional for browsing vs filtered view) ──────────────
+    let userId = c.req.header("X-User-Id")?.trim();
+    if (!userId) {
+      userId = c.req.query("userId")?.trim();
+    }
+
+    const legacyTools = await listTools(redis);
+
+    let userTools: RegisteredTool[] = [];
+    if (userId) {
+      const { listUserTools } = await import("./memory");
+      userTools = await listUserTools(redis, userId);
+    }
+
+    // Merge: Built-ins + Global Custom + User Private
     const registry = [
       ...BUILTIN_DECLARATIONS.map((t: any) => ({
         ...t,
@@ -640,10 +655,17 @@ app.get("/tools/v1/registry", async (c) => {
         category: "core",
         status: "active"
       })),
-      ...customTools.map((t: any) => ({
+      ...legacyTools.map((t: any) => ({
         ...t,
         id: `custom-${t.name}`,
         source: "user",
+        category: "extension",
+        status: "active"
+      })),
+      ...userTools.map((t: any) => ({
+        ...t,
+        id: `private-${t.name}`,
+        source: "user-private",
         category: "extension",
         status: "active"
       }))
@@ -688,94 +710,6 @@ app.get("/schedules", async (c) => {
   }
 });
 
-// ─── Human Approval Registry ───────────────────────────────────────────────────
-
-app.get("/approvals", async (c) => {
-  try {
-    const redis = getRedis(c.env);
-    const statusFilter = c.req.query("status") ?? "all";
-    const raw = await redis.lrange("agent:approvals", 0, 99) as string[];
-    const approvals = raw
-      .map((r: string) => {
-        try {
-          return JSON.parse(r) as {
-            id: string;
-            operation: string;
-            channel: string;
-            metadata?: unknown;
-            status: string;
-            createdAt: string;
-            decidedAt?: string;
-            approved?: boolean;
-            reason?: string;
-          };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean) as Record<string, unknown>[];
-
-    const filtered =
-      statusFilter === "all"
-        ? approvals
-        : approvals.filter((a) => a.status === statusFilter);
-
-    return c.json({ approvals: filtered, count: filtered.length });
-  } catch (err) {
-    console.error("[/approvals error]", err);
-    return c.json({ error: String(err) }, 500);
-  }
-});
-
-app.post("/approvals/:id/decision", async (c) => {
-  try {
-    const id = c.req.param("id");
-    const body = await c.req.json<{
-      approved: boolean;
-      reason?: string;
-    }>();
-
-    const redis = getRedis(c.env);
-    const key = `agent:approval:${id}`;
-    const existingRaw = await redis.get<string>(key);
-    if (!existingRaw) {
-      return c.json({ error: "Approval request not found" }, 404);
-    }
-
-    let record: any;
-    try {
-      record = JSON.parse(existingRaw);
-    } catch {
-      record = { id };
-    }
-
-    record.status = body.approved ? "approved" : "rejected";
-    record.approved = body.approved;
-    record.reason = body.reason ?? record.reason ?? null;
-    record.decidedAt = new Date().toISOString();
-
-    await redis.set(key, JSON.stringify(record), { ex: 60 * 60 * 24 });
-
-    // Also update the rolling approvals list
-    const listRaw = await redis.lrange("agent:approvals", 0, 199) as string[];
-    for (let i = 0; i < listRaw.length; i++) {
-      try {
-        const item = JSON.parse(listRaw[i]);
-        if (item.id === id) {
-          await redis.lset("agent:approvals", i, JSON.stringify(record));
-          break;
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
-
-    return c.json({ success: true, approval: record });
-  } catch (err) {
-    console.error("[/approvals/:id/decision error]", err);
-    return c.json({ error: String(err) }, 500);
-  }
-});
 
 // ─── Telegram API ─────────────────────────────────────────────────────────────
 // When X-User-Id + Authorization (internal secret) are present, use D1 per-user config.
@@ -1436,6 +1370,17 @@ Max 80 words. Be specific and actionable.`,
       console.error("[ToolEvolution error]", e);
     }
 
+    // ── Proactive Trigger Evaluation ───────────────────────────────────────────
+    try {
+      const triggerResult = await evaluateAllTriggers(c.env);
+      console.log(
+        `[cron/tick] Triggers: evaluated=${triggerResult.evaluated}, fired=${triggerResult.fired}`,
+        triggerResult.errors.length > 0 ? `errors=${triggerResult.errors.join("; ")}` : ""
+      );
+    } catch (triggerErr) {
+      console.error("[cron/tick] Trigger evaluation failed:", String(triggerErr));
+    }
+
     return c.json({
       success: true,
       reflection,
@@ -1611,6 +1556,7 @@ app.route("/vault", vaultRoutes);
 app.route("/approvals", approvalsRoutes);
 app.route("/audit", auditRoutes);
 app.route("/cf-email", cfEmailRoutes);
+app.route("/triggers", triggersRouter);
 
 // ─── Telegram Webhook: Handle Approval Callbacks ──────────────────────────────
 // This is integrated into the existing Telegram webhook handler below.
@@ -1628,4 +1574,100 @@ export default {
   // CF Email Routing: fires for every inbound email to vega@yourdomain.com
   // Wire up in Cloudflare Dashboard: Email > Email Routing > Email Workers
   email: handleCfEmailInbound,
+
+  // CF Cron Triggers: fires every 5 minutes (configured in wrangler.toml)
+  scheduled: async (_event: any, env: Env, ctx: ExecutionContext) => {
+    ctx.waitUntil(runScheduledTick(env));
+  },
 };
+
+async function runScheduledTick(env: Env): Promise<void> {
+  const redis = getRedis(env);
+  const healingReport: string[] = [];
+
+  // ── 1. Self-healing ──────────────────────────────────────────────────────────
+  try {
+    const STUCK_THRESHOLD_MS = 15 * 60 * 1000;
+    const now = Date.now();
+    const agentListRaw = await redis.lrange("agent:spawned", 0, 99) as string[];
+
+    for (let i = 0; i < agentListRaw.length; i++) {
+      try {
+        const agent = JSON.parse(agentListRaw[i]);
+        if (agent.status !== "running") continue;
+
+        const age = now - new Date(agent.spawnedAt).getTime();
+        if (age < STUCK_THRESHOLD_MS) continue;
+
+        const task = await getTask(redis, agent.agentId);
+        if (!task || task.status !== "running") continue;
+
+        const errorMsg = `Agent timed out after ${Math.round(age / 60000)} minutes.`;
+        await updateTask(redis, agent.agentId, {
+          status: "error",
+          result: { error: errorMsg, failedAt: new Date().toISOString(), selfHealed: true },
+        });
+
+        agent.status = "error";
+        agent.healedAt = new Date().toISOString();
+        await redis.lset("agent:spawned", i, JSON.stringify(agent));
+        healingReport.push(`Healed stuck agent '${agent.agentName}' (${agent.agentId})`);
+
+        if (agent.parentSessionId) {
+          const { fireCompletionCallback } = await import("./routes/workflow");
+          await fireCompletionCallback(env, {
+            taskId: agent.agentId,
+            agentName: agent.agentName,
+            parentSessionId: agent.parentSessionId,
+            memoryPrefix: agent.agentConfig?.memoryPrefix ?? agent.agentId,
+            status: "error",
+            result: `Agent '${agent.agentName}' timed out after ${Math.round(age / 60000)} minutes.`,
+            completedAt: new Date().toISOString(),
+          }).catch(() => { });
+        }
+      } catch { /* skip malformed entry */ }
+    }
+  } catch (e) {
+    console.error("[scheduled] Self-healing failed:", e);
+  }
+
+  // ── 2. Trigger evaluation ────────────────────────────────────────────────────
+  try {
+    const { evaluateAllTriggers } = await import("./routes/triggers");
+    const result = await evaluateAllTriggers(env);
+    console.log(`[scheduled] Triggers: evaluated=${result.evaluated} fired=${result.fired}`);
+  } catch (e) {
+    console.error("[scheduled] Trigger evaluation failed:", e);
+  }
+
+  // ── 2.5 Goal Monitoring ─────────────────────────────────────────────────────
+  try {
+    const { checkGoalsAtCron } = await import("./tools/goals");
+    await checkGoalsAtCron(env);
+  } catch (e) {
+    console.error("[scheduled] Goal monitoring failed:", e);
+  }
+
+  // ── 3. Self-reflection (now actually stored and readable) ────────────────────
+  try {
+    const { think } = await import("./gemini");
+    const reflection = await think(
+      env.GEMINI_API_KEY,
+      `You are VEGA. Time: ${new Date().toISOString()}.
+Self-healing this tick: ${healingReport.length > 0 ? healingReport.join("; ") : "all agents healthy"}.
+In one sentence, what is the most useful thing you could do proactively right now?`,
+      "Be brief and specific."
+    );
+
+    await redis.set("agent:last-tick", JSON.stringify({
+      timestamp: Date.now(),
+      reflection,
+      healingReport,
+      iso: new Date().toISOString(),
+    }), { ex: 60 * 60 * 25 });
+
+    console.log("[scheduled] Reflection:", reflection);
+  } catch (e) {
+    console.error("[scheduled] Reflection failed:", e);
+  }
+}

@@ -9,6 +9,8 @@ WORKER_URL             = "https://autonomous-ai-agent.adesrnd.workers.dev"
 UPSTASH_WORKFLOW_URL   = "https://autonomous-ai-agent.adesrnd.workers.dev"
 BRIDGE_URL             = "https://vega-ebon.vercel.app"
 QSTASH_URL             = "https://qstash-us-east-1.upstash.io"
+CAPSOLVER_API_KEY      = "CAP-2A932F8E72FBCD417549F606D7407DAE549D9DC65DC85046D1DF6120739FBA70"
+TWOCAPTCHA_API_KEY     = "581dddb6024053b4991636afb6596b0a"
 
 # ─── D1 ───────────────────────────────────────────────────────────────────────
 # Contains: telegram_configs, whatsapp_configs, user_secrets, pending_approvals,
@@ -85,3 +87,9 @@ name = "CF_EMAIL_SENDER"
 # WHATSAPP_WEBHOOK_VERIFY_TOKEN
 # E2B_API_KEY               → https://e2b.dev (code execution sandbox)
 # BROWSERLESS_TOKEN         → https://browserless.io (legacy browse_web fallback)
+
+# ─── Native CF Cron (self-healing + triggers + reflection) ───────────────────
+# Runs every 5 minutes automatically. Free, no QStash credits consumed.
+# Calls the same logic as POST /cron/tick but skips QStash signature check.
+[triggers]
+crons = ["*/5 * * * *"]

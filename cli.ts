@@ -362,8 +362,10 @@ function wordWrap(text: string, width: number, indentStr: string): string {
 // ─── Tool event renderer ──────────────────────────────────────────────────────
 
 const TOOL_ICONS: Record<string, string> = {
-  web_search: "🔍", browse_web: "🌐", fetch_url: "📄",
+  web_search: "🔍", browse_web: "🌐", cf_browse_page: "🌐",
+  cf_screenshot: "📸", cf_extract_data: "⛏️", fetch_url: "📄",
   store_memory: "💾", recall_memory: "🧠", run_code: "💻",
+  set_secret: "🔐", get_secret: "🔑", list_secrets: "📜",
   generate_image: "🎨", translate: "🌍", market_data: "📈",
   spawn_agent: "🤖", write_file: "📁", read_file: "📂",
   schedule_cron: "⏰", send_email: "📧", calculate: "🧮",
@@ -528,6 +530,7 @@ function helpText(): void {
   const examples: [string, string][] = [
     ["Search", "\"what\\'s the latest news on AI agents?\""],
     ["Memory", "\"remember that I prefer TypeScript\""],
+    ["Vault", "\"remember my github token: ghp_...\""],
     ["Market", "\"what\\'s BTC at right now?\""],
     ["Goal", "\"track goal: ship VEGA v2 by end of month\""],
     ["Image", "\"generate an image of a nebula at dusk\""],

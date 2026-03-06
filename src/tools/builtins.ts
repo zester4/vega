@@ -76,6 +76,12 @@
 
 import { Client as QStashClient } from "@upstash/qstash";
 import type { RegisteredTool } from "../memory";
+import {
+  registerUserTool,
+  listUserTools,
+  getUserTool,
+  deleteUserTool,
+} from "../memory";
 import { execLocalFsTool } from "./local-fs";
 import { MESH_TOOL_DECLARATIONS, execMeshTool } from "../agent-mesh";
 
@@ -83,7 +89,10 @@ import { MESH_TOOL_DECLARATIONS, execMeshTool } from "../agent-mesh";
 import { VAULT_TOOL_DECLARATIONS, executeVaultTool } from "../routes/vault";
 import { CF_BROWSER_DECLARATIONS, executeCfBrowserTool } from "./cf-browser";
 import { toolNeedsApproval, requestApproval, waitForApproval } from "../routes/approvals";
-import { insertAuditLog } from "../routes/audit";
+import { insertAuditLog, type AuditEntry } from "../routes/audit";
+import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "../routes/triggers";
+import { PROFILE_TOOL_DECLARATIONS, executeProfileTool } from "../routes/profile";
+import { CAPTCHA_TOOL_DECLARATIONS, executeCaptchaTool } from "./captcha";
 
 // ─── Tool Declarations (Gemini sees these) ────────────────────────────────────
 
@@ -324,6 +333,26 @@ export const BUILTIN_DECLARATIONS = [
   },
 
   // ── AGENT INFRASTRUCTURE ────────────────────────────────────────────────────
+
+  {
+    name: "discover_tools",
+    description:
+      "Search the full tool registry to find tools by capability. " +
+      "Use this when you need a capability that isn't in your immediate tool list. " +
+      "Returns matching tool names, descriptions, and parameters. " +
+      "Examples: discover_tools('email'), discover_tools('browser'), discover_tools('stripe'). " +
+      "Leave query empty to list ALL registered tools including ones you created.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Keyword to search for. Leave empty to list all tools.",
+        },
+      },
+      required: [],
+    },
+  },
 
   {
     name: "trigger_workflow",
@@ -570,6 +599,20 @@ export const BUILTIN_DECLARATIONS = [
   },
 
   {
+    name: "read_audit_log",
+    description: "Read your own tool execution logs to verify past actions, check for errors, or confirm success of background tasks. Can filter by tool name or status.",
+    parameters: {
+      type: "object",
+      properties: {
+        tool: { type: "string", description: "Optional: filter by tool name" },
+        status: { type: "string", enum: ["ok", "error", "denied"], description: "Optional: filter by status" },
+        limit: { type: "number", description: "Max entries to return (default 10, max 50)" },
+      },
+      required: [],
+    },
+  },
+
+  {
     name: "ingest_knowledge_base",
     description: "Fetch and embed external knowledge into long-term semantic memory. Provide URLs and/or raw texts; content will be chunked and stored in Upstash Vector for later semantic_recall/RAG.",
     parameters: {
@@ -750,7 +793,15 @@ export const BUILTIN_DECLARATIONS = [
       "Create and track long-term goals with milestones and autonomous progress pursuit. VEGA checks active goals every session and proactively advances them. Goals can trigger Telegram notifications at progress milestones (25%, 50%, 75%, 100%). Stalled high-priority goals are auto-notified via cron.",
     parameters: {
       properties: {
-        action: { type: "string", enum: ["create_goal", "update_progress", "list_goals", "get_goal", "complete_goal", "delete_goal", "complete_milestone", "check_all"], description: "Action to perform" },
+        action: {
+          type: "string",
+          enum: [
+            "create_goal", "update_progress", "list_goals", "get_goal",
+            "complete_goal", "delete_goal", "add_milestone", "complete_milestone",
+            "pause_goal", "resume_goal", "check_all", "get_history"
+          ],
+          description: "Action to perform"
+        },
         title: { type: "string", description: "Goal title (required for create_goal)" },
         description: { type: "string", description: "Detailed goal description" },
         category: { type: "string", description: "Goal category: business, research, personal, monitoring, custom" },
@@ -764,6 +815,19 @@ export const BUILTIN_DECLARATIONS = [
         progress: { type: "number", description: "Progress percentage 0-100 for update_progress" },
         notes: { type: "string", description: "Progress notes or next action" },
         status: { type: "string", description: "Filter goals by status: active, completed, paused, cancelled" },
+        deadline: {
+          type: "string",
+          description: "Goal deadline in ISO format: '2025-06-01'. Creates urgency and enables deadline warnings."
+        },
+        autoAdvance: {
+          type: "boolean",
+          description: "If true, VEGA spawns a sub-agent to autonomously advance this goal when it stalls. Requires nextAction to be set."
+        },
+        dependsOn: {
+          type: "array",
+          description: "List of goalIds that must complete before this goal can start.",
+          items: { type: "string" }
+        },
       },
       required: ["action"],
     },
@@ -865,8 +929,28 @@ export const BUILTIN_DECLARATIONS = [
   // ── KEYS VAULT (Secure API Key Management) ─────────────────────────────────
   ...VAULT_TOOL_DECLARATIONS,
 
+  // ── Proactive Trigger Engine ─────────────────────────────────────────────────
+  ...TRIGGER_TOOL_DECLARATIONS,
+
+  // ── User Personality Profile ─────────────────────────────────────────────────
+  ...PROFILE_TOOL_DECLARATIONS,
+
   // ── CLOUDFLARE BROWSER RENDERING ───────────────────────────────────────────
   ...CF_BROWSER_DECLARATIONS,
+
+  // ── CAPTCHA BYPASS ENGINE ──────────────────────────────────────────────────
+  ...CAPTCHA_TOOL_DECLARATIONS,
+
+  {
+    name: "check_approval_status",
+    description: "Check the current status of a human approval request. Use this to poll if a previously-blocked tool (like set_secret or trigger_workflow) has been approved or rejected by the user. Returns 'pending', 'approved', or 'rejected'.",
+    parameters: {
+      properties: {
+        approvalId: { type: "string", description: "The approval ID returned by the blocked tool call." },
+      },
+      required: ["approvalId"],
+    },
+  },
 
 ] as const;
 
@@ -875,11 +959,112 @@ type ToolArgs = Record<string, unknown>;
 
 // ─── Main Dispatcher ──────────────────────────────────────────────────────────
 
+// ─── Main Dispatcher ──────────────────────────────────────────────────────────
+
+const REQUIRES_APPROVAL = ["set_secret", "trigger_workflow", "spawn_agent", "send_email", "send_sms", "delete_file", "delete_memory"];
+
 export async function executeTool(
   toolName: string,
   args: ToolArgs,
   env: Env,
   callerSessionId?: string
+): Promise<Record<string, unknown>> {
+  // ── Resolve userId for audit + approvals ──────────────────────────────────
+  let resolvedUserId: string | undefined;
+  if (callerSessionId) {
+    try {
+      const { getRedis } = await import("../memory");
+      const redis = getRedis(env);
+      const mapped = await redis.get(`session:user-map:${callerSessionId}`);
+      if (mapped && typeof mapped === "string") resolvedUserId = mapped;
+    } catch { /* non-fatal */ }
+  }
+
+  const startMs = Date.now();
+
+  try {
+    // Track tool usage for self-evolution heuristics
+    try {
+      const { getRedis } = await import("../memory");
+      const redis = getRedis(env);
+      const key = `agent:tool-usage:${toolName}`;
+      await redis.incr(key);
+      await redis.expire(key, 60 * 60 * 24);
+    } catch (usageErr) {
+      console.warn("[ToolUsage] Failed to record usage:", String(usageErr));
+    }
+
+    // ── Approval Gate ─────────────────────────────────────────────────────────
+    if (toolNeedsApproval(toolName, args)) {
+      if (!resolvedUserId) {
+        return {
+          error: `Tool '${toolName}' requires human approval, but no user session found.`,
+          toolName,
+        };
+      }
+      const approvalId = await requestApproval(env.DB, env, {
+        userId: resolvedUserId,
+        sessionId: callerSessionId ?? "unknown",
+        toolName,
+        toolArgs: args,
+      });
+      const decision = await waitForApproval(env.DB, approvalId, args);
+      if (!decision.approved) {
+        // Log the denial
+        insertAuditLog(env.DB, {
+          userId: resolvedUserId,
+          sessionId: callerSessionId ?? "unknown",
+          toolName,
+          args,
+          denied: true,
+          durationMs: Date.now() - startMs,
+        }).catch(e => console.warn("[audit]", e));
+
+        return {
+          error: `Tool '${toolName}' was denied by the user: ${decision.reason}`,
+          toolName,
+          denied: true,
+        };
+      }
+      args = decision.args ?? args;
+    }
+
+    // ── Execute ───────────────────────────────────────────────────────────────
+    const result = await executeToolInner(toolName, args, env, callerSessionId, resolvedUserId);
+
+    // ── Audit: success ────────────────────────────────────────────────────────
+    insertAuditLog(env.DB, {
+      userId: resolvedUserId ?? null,
+      sessionId: callerSessionId ?? "unknown",
+      toolName,
+      args,
+      result,
+      durationMs: Date.now() - startMs,
+    }).catch(e => console.warn("[audit]", e));
+
+    return result;
+
+  } catch (e) {
+    // ── Audit: error ──────────────────────────────────────────────────────────
+    insertAuditLog(env.DB, {
+      userId: resolvedUserId ?? null,
+      sessionId: callerSessionId ?? "unknown",
+      toolName,
+      args,
+      error: String(e),
+      durationMs: Date.now() - startMs,
+    }).catch(() => { });
+
+    return { error: `Tool '${toolName}' threw: ${String(e)}`, toolName };
+  }
+}
+
+async function executeToolInner(
+  toolName: string,
+  args: ToolArgs,
+  env: Env,
+  callerSessionId?: string,
+  resolvedUserId?: string
 ): Promise<Record<string, unknown>> {
   try {
     // Track tool usage for self-evolution heuristics
@@ -931,11 +1116,11 @@ export async function executeTool(
       case "cancel_agent": return await execCancelAgent(args, env);
       // Tool Creation & Lifecycle
       case "create_tool":
-        return await execCreateTool(args, env);
+        return await execCreateTool(args, env, resolvedUserId);
       case "improve_tool":
         return await execImproveTool(args, env);
       case "delete_tool":
-        return await execDeleteTool(args, env);
+        return await execDeleteTool(args, env, resolvedUserId);
       case "benchmark_tool": return await execBenchmarkTool(args, env);
 
       // Scheduling
@@ -944,7 +1129,8 @@ export async function executeTool(
       case "list_crons": return await execListCrons(args, env);
       case "update_cron": return await execUpdateCron(args, env);
       case "delete_cron": return await execDeleteCron(args, env);
-      case "human_approval_gate": return await execHumanApprovalGate(args, env);
+      case "human_approval_gate": return await execHumanApprovalGate(args, env, callerSessionId);
+      case "read_audit_log": return await execReadAuditLog(args, env, callerSessionId);
       case "ingest_knowledge_base": return await execIngestKnowledgeBase(args, env);
 
       // Integrations
@@ -963,14 +1149,28 @@ export async function executeTool(
       case "market_data": return await execMarketDataTool(args, env);
 
       // Goals & Proactive
-      case "manage_goals": return await execManageGoalsTool(args, env);
-      case "proactive_notify": return await execProactiveNotifyTool(args, env);
+      case "manage_goals": return await execManageGoalsTool(args, env, resolvedUserId);
+      case "proactive_notify": return await execProactiveNotifyTool(args, env, resolvedUserId);
 
       // Language
       case "translate": return await execTranslateTool(args, env);
 
       // Web Scraping
       case "firecrawl": return await execFirecrawlTool(args, env);
+
+      case "create_trigger":
+      case "list_triggers":
+      case "delete_trigger":
+        return (await executeTriggerTool(toolName, args, env, resolvedUserId)) as Record<string, unknown>;
+
+      case "get_profile":
+      case "update_profile":
+        return (await executeProfileTool(toolName, args, env, resolvedUserId)) as Record<string, unknown>;
+
+      case "cf_captcha_bypass":
+      case "cf_captcha_detect":
+      case "cf_stealth_browse":
+        return (await executeCaptchaTool(toolName, args, env)) as Record<string, unknown>;
 
       // ── Agent Mesh (Peer-to-Peer) — Dispatch to agent-mesh.ts ──────────────
       case "message_agent":
@@ -985,18 +1185,7 @@ export async function executeTool(
       case "get_secret":
       case "list_secrets":
       case "delete_secret":
-        // Vault requires userId - try to get from Redis session mapping
-        let vaultUserId: string | undefined;
-        if (callerSessionId) {
-          const { getRedis } = await import("../memory");
-          const redis = getRedis(env);
-          const mappedUserId = await redis.get(`session:user-map:${callerSessionId}`);
-          if (mappedUserId && typeof mappedUserId === 'string') {
-            vaultUserId = mappedUserId;
-          }
-        }
-        const vaultResult = await executeVaultTool(toolName, args, env, vaultUserId);
-        return vaultResult as unknown as Record<string, unknown>;
+        return (await executeVaultTool(toolName, args, env, resolvedUserId)) as unknown as Record<string, unknown>;
 
       // ── Cloudflare Browser Rendering ────────────────────────────────────────
       case "cf_browse_page":
@@ -1006,7 +1195,12 @@ export async function executeTool(
       case "cf_click":
         return (await executeCfBrowserTool(toolName, args, env)) as Record<string, unknown>;
 
-      default: return await execDynamicTool(toolName, args, env);
+      case "check_approval_status": return await execCheckApprovalStatus(args, env);
+      case "discover_tools":
+        return await execDiscoverTools(args, env, resolvedUserId);
+
+
+      default: return await execDynamicTool(toolName, args, env, resolvedUserId);
     }
   } catch (e) {
     // NEVER propagate — always return a plain object
@@ -1019,39 +1213,58 @@ export async function executeTool(
 async function execDynamicTool(
   toolName: string,
   args: ToolArgs,
-  env: Env
+  env: Env,
+  resolvedUserId?: string
 ): Promise<Record<string, unknown>> {
-  const { getRedis, listTools } = await import("../memory");
+  const { getRedis } = await import("../memory");
   const redis = getRedis(env);
-  const tools = await listTools(redis);
-  const dynTool = tools.find((t: RegisteredTool) => t.name === toolName && !t.builtIn);
 
-  if (!dynTool) {
-    return { error: `Unknown tool: '${toolName}'. Use create_tool to register new tools.` };
+  // 1. Try user-scoped tool first (private tools)
+  let dynTool: RegisteredTool | null = null;
+  if (resolvedUserId) {
+    dynTool = await getUserTool(redis, resolvedUserId, toolName);
   }
 
-  // Execute the stored real JS function body
+  // 2. Fall back to legacy global tools (backwards compat during migration)
+  if (!dynTool) {
+    const { listTools } = await import("../memory");
+    const globalTools = await listTools(redis);
+    dynTool = globalTools.find((t) => t.name === toolName && !t.builtIn) ?? null;
+  }
+
+  if (!dynTool) {
+    return { error: `Unknown tool: '${toolName}'. Use create_tool to build it.` };
+  }
+
   try {
-    // We stored real async JS code — run it with AsyncFunction constructor
-    // The function body receives (args, env, fetch) as its scope
     const AsyncFunction = (async function () { }).constructor as new (
       ...args: string[]
     ) => (...a: unknown[]) => Promise<unknown>;
+
+    // ── Fix 2: inject getSecret so tools can use vault keys at runtime ──────
+    const vaultGetSecret = async (keyName: string): Promise<string | null> => {
+      if (!resolvedUserId || !env.VAULT_ENCRYPTION_SECRET) return null;
+      try {
+        const { vaultGet } = await import("../routes/vault");
+        return await vaultGet(env.DB, env.VAULT_ENCRYPTION_SECRET, resolvedUserId, keyName);
+      } catch {
+        return null;
+      }
+    };
 
     const fn = new AsyncFunction(
       "args",
       "env",
       "fetchFn",
+      "getSecret",   // ← injected vault helper
       dynTool.handlerCode
     );
 
-    // Provide a safe fetch wrapper
     const safeFetch = (url: string, opts?: RequestInit) =>
       globalThis.fetch(url, opts);
 
-    const result = await fn(args, env, safeFetch);
+    const result = await fn(args, env, safeFetch, vaultGetSecret);
 
-    // Ensure result is a plain object
     if (result && typeof result === "object" && !Array.isArray(result)) {
       return result as Record<string, unknown>;
     }
@@ -1059,21 +1272,13 @@ async function execDynamicTool(
     return { result: String(result) };
 
   } catch (execErr) {
-    console.error(`[DynamicTool] ${toolName} execution error:`, String(execErr));
-
-    // Graceful fallback: ask Gemini to interpret the tool description
+    console.error(`[DynamicTool] ${toolName} error:`, String(execErr));
     try {
       const { think } = await import("../gemini");
       const fallback = await think(
         env.GEMINI_API_KEY,
-        `Tool "${toolName}" failed to execute with real code.
-Description: ${dynTool.description}
-Args passed: ${JSON.stringify(args)}
-Error: ${String(execErr)}
-
-Return a JSON object with what this tool would return based on its description.
-Return ONLY valid JSON, no other text.`,
-        "You are a precise tool executor. Return only valid JSON."
+        `Tool "${toolName}" failed. Description: ${dynTool.description}. Args: ${JSON.stringify(args)}. Error: ${String(execErr)}. Return a JSON object with what this tool would return.`,
+        "Return only valid JSON."
       );
       try {
         const parsed = JSON.parse(fallback.trim());
@@ -1081,7 +1286,7 @@ Return ONLY valid JSON, no other text.`,
       } catch {
         return { result: fallback, _executionMode: "ai_interpreted" };
       }
-    } catch (aiErr) {
+    } catch {
       return { error: `Dynamic tool '${toolName}' failed: ${String(execErr)}` };
     }
   }
@@ -2365,7 +2570,7 @@ async function execCancelAgent(args: ToolArgs, env: Env): Promise<Record<string,
   };
 }
 
-async function execCreateTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+async function execCreateTool(args: ToolArgs, env: Env, resolvedUserId?: string): Promise<Record<string, unknown>> {
   const { name, description, requirements = "", parameters: parametersStr, testInputs: testInputsStr } = args as {
     name: string;
     description: string;
@@ -2491,10 +2696,16 @@ Return nothing else.`,
       builtIn: false,
     };
 
-    await registerTool(redis, tool);
-
-    // Store design doc for reference
-    await redis.set(`tool:design:${name}`, designDoc.slice(0, 4000), { ex: 60 * 60 * 24 * 90 });
+    if (resolvedUserId) {
+      // Private tool — scoped to this user
+      await registerUserTool(redis, resolvedUserId, tool);
+      await redis.set(`tool:design:${resolvedUserId}:${name}`, designDoc.slice(0, 4000), { ex: 60 * 60 * 24 * 90 });
+    } else {
+      // Fallback: global (should only happen for system/admin calls)
+      const { registerTool } = await import("../memory");
+      await registerTool(redis, tool);
+      await redis.set(`tool:design:${name}`, designDoc.slice(0, 4000), { ex: 60 * 60 * 24 * 90 });
+    }
 
     return {
       success: true,
@@ -2537,19 +2748,25 @@ async function execImproveTool(args: ToolArgs, env: Env): Promise<Record<string,
   }, env);
 }
 
-async function execDeleteTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+async function execDeleteTool(args: ToolArgs, env: Env, resolvedUserId?: string): Promise<Record<string, unknown>> {
   const { name } = args as { name: string };
-  const { Redis } = await import("@upstash/redis/cloudflare");
-  const redis = Redis.fromEnv(env);
+  const { getRedis } = await import("../memory");
+  const redis = getRedis(env);
 
-  const deleted = await redis.del(`tool:${name}`);
-  await redis.del(`tool:design:${name}`);
-
-  if (deleted > 0) {
-    return { success: true, message: `Tool '${name}' has been deleted successfully.`, name };
-  } else {
-    return { success: false, error: `Tool '${name}' not found or already deleted.`, name };
+  if (resolvedUserId) {
+    const deleted = await deleteUserTool(redis, resolvedUserId, name);
+    await redis.del(`tool:design:${resolvedUserId}:${name}`);
+    return deleted
+      ? { success: true, message: `Tool '${name}' deleted.`, name }
+      : { success: false, error: `Tool '${name}' not found.`, name };
   }
+
+  // Fallback: global
+  const deleted = await redis.del(`agent:tool:${name}`);
+  await redis.del(`tool:design:${name}`);
+  return deleted > 0
+    ? { success: true, message: `Tool '${name}' deleted.`, name }
+    : { success: false, error: `Tool '${name}' not found.`, name };
 }
 
 async function execBenchmarkTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
@@ -2819,57 +3036,76 @@ async function execUpdateCron(args: ToolArgs, env: Env): Promise<Record<string, 
 // HUMAN APPROVAL GATE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function execHumanApprovalGate(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+async function execHumanApprovalGate(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
   const { operation, channel = "ui", metadata } = args as {
     operation: string;
     channel?: "ui" | "telegram" | "email" | "all";
     metadata?: Record<string, unknown>;
   };
 
-  const { getRedis } = await import("../memory");
-  const redis = getRedis(env);
-
-  const requestId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const record = {
-    id: requestId,
-    operation,
-    channel,
-    metadata: metadata ?? {},
-    status: "pending" as const,
-    createdAt: new Date().toISOString(),
-  };
-
-  // Persist request
-  await redis.set(`agent:approval:${requestId}`, JSON.stringify(record), {
-    ex: 60 * 60 * 24,
-  });
-  await redis.lpush("agent:approvals", JSON.stringify(record));
-  await redis.ltrim("agent:approvals", 0, 99);
-
-  // Optional: notify via Telegram (disabled unless a global bot is explicitly wired up)
-  if (channel === "telegram" || channel === "all") {
-    try {
-      const { getTelegramConfig, TelegramBot } = await import("../telegram");
-      const config = await getTelegramConfig(env);
-      if (config) {
-        const bot = new TelegramBot(config.token);
-        const text = `⚠️ Approval requested\n\nOperation:\n${operation}\n\nRequest ID: ${requestId}\n\nUse the dashboard or inline buttons to approve or reject.`;
-        await bot.sendMessage(config.botId, text, {
-          parse_mode: "HTML",
-        });
-      }
-    } catch (e) {
-      console.warn("[human_approval_gate] Telegram notification failed:", String(e));
-    }
+  // Need userId to scope the approval
+  let userId: string | undefined;
+  if (callerSessionId) {
+    const { getRedis } = await import("../memory");
+    const redis = getRedis(env);
+    userId = (await redis.get(`session:user-map:${callerSessionId}`)) as string | undefined;
   }
 
-  // Email notification could be added here using send_email, but we avoid
-  // calling tools recursively from within tools to keep execution simple.
+  if (!userId) {
+    return { error: "Approval request failed: No userId found in context (unauthenticated)." };
+  }
+
+  // Use the robust approval path from src/routes/approvals.ts
+  const approvalId = await requestApproval(env.DB, env, {
+    userId,
+    sessionId: callerSessionId ?? "unknown",
+    toolName: "manual_gate",
+    toolArgs: { operation, ...metadata },
+  });
 
   return {
-    ...record,
-    message: "Approval requested. Status is pending. Call this tool again later or poll the approvals API to see the final decision.",
+    id: approvalId,
+    operation,
+    channel,
+    status: "pending",
+    message: `Approval requested via ${channel}. Request ID: ${approvalId}. VEGA will pause until you decide.`,
   };
+}
+
+async function execReadAuditLog(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
+  const { tool, status, limit = 10 } = args as { tool?: string; status?: string; limit?: number };
+
+  let userId: string | undefined;
+  if (callerSessionId) {
+    const { getRedis } = await import("../memory");
+    const redis = getRedis(env);
+    userId = (await redis.get(`session:user-map:${callerSessionId}`)) as string | undefined;
+  }
+
+  if (!userId) {
+    return { error: "Audit log access failed: No userId found in context." };
+  }
+
+  // Build query
+  let sql = "SELECT * FROM audit_log WHERE user_id = ?";
+  const params: unknown[] = [userId];
+
+  if (tool) { sql += " AND tool_name = ?"; params.push(tool); }
+  if (status) { sql += " AND status = ?"; params.push(status); }
+
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  params.push(Math.min(Number(limit) || 10, 50));
+
+  try {
+    const rows = await env.DB.prepare(sql).bind(...params).all<AuditEntry>();
+    return {
+      entries: rows.results ?? [],
+      count: rows.results?.length ?? 0,
+      filters: { tool, status, limit },
+    };
+  } catch (e) {
+    return { error: `Failed to read audit log: ${String(e)}` };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2948,6 +3184,59 @@ async function execIngestKnowledgeBase(args: ToolArgs, env: Env): Promise<Record
     sources: sources.length,
     chunks: chunkCount,
     topic: topic ?? null,
+  };
+}
+
+async function execDiscoverTools(
+  args: ToolArgs,
+  env: Env,
+  resolvedUserId?: string
+): Promise<Record<string, unknown>> {
+  const { query } = args as { query?: string };
+  const { getRedis, listTools, listUserTools } = await import("../memory");
+  const redis = getRedis(env);
+
+  // Gather all tools: builtins + user-private + legacy global
+  const builtinEntries = BUILTIN_DECLARATIONS.map((t: any) => ({
+    name: t.name,
+    description: t.description,
+    source: "builtin",
+  }));
+
+  const userTools = resolvedUserId
+    ? (await listUserTools(redis, resolvedUserId)).map((t) => ({
+      name: t.name,
+      description: t.description,
+      source: "user-created",
+    }))
+    : [];
+
+  const globalTools = (await listTools(redis)).map((t) => ({
+    name: t.name,
+    description: t.description,
+    source: "global",
+  }));
+
+  const allTools = [...builtinEntries, ...userTools, ...globalTools];
+
+  // Filter by query if provided
+  const q = query?.toLowerCase().trim();
+  const matched = q
+    ? allTools.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        t.description.toLowerCase().includes(q)
+    )
+    : allTools;
+
+  return {
+    tools: matched,
+    count: matched.length,
+    total_available: allTools.length,
+    query: q ?? null,
+    tip: matched.length === 0
+      ? "No tools matched. Try a broader keyword or use create_tool to build one."
+      : undefined,
   };
 }
 
@@ -3127,6 +3416,25 @@ async function execTextToSpeechTool(args: ToolArgs, env: Env): Promise<Record<st
   return execTextToSpeech(args, env);
 }
 
+async function execCheckApprovalStatus(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { approvalId } = args as { approvalId: string };
+  if (!approvalId) return { error: "approvalId required" };
+
+  const { getApprovalRequest } = await import("../routes/approvals");
+  const request = await getApprovalRequest(env.DB, approvalId);
+
+  if (!request) return { error: "Approval request not found" };
+
+  return {
+    id: request.id,
+    toolName: request.tool_name,
+    status: request.status,
+    decidedAt: request.decided_at,
+    reason: request.decision_note
+  };
+}
+
+
 async function execSpeechToTextTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
   const { execSpeechToText } = await import("./voice");
   return execSpeechToText(args, env);
@@ -3137,14 +3445,14 @@ async function execMarketDataTool(args: ToolArgs, env: Env): Promise<Record<stri
   return execMarketData(args, env);
 }
 
-async function execManageGoalsTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { execManageGoals } = await import("./goals");
-  return execManageGoals(args, env);
+async function execManageGoalsTool(args: ToolArgs, env: Env, userId?: string): Promise<Record<string, unknown>> {
+  const { execManageGoalsTool } = await import("./goals");
+  return execManageGoalsTool(args, env, userId);
 }
 
-async function execProactiveNotifyTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
-  const { execProactiveNotify } = await import("./goals");
-  return execProactiveNotify(args, env);
+async function execProactiveNotifyTool(args: ToolArgs, env: Env, userId?: string): Promise<Record<string, unknown>> {
+  const { execProactiveNotifyTool } = await import("./goals");
+  return execProactiveNotifyTool(args, env, userId);
 }
 
 async function execTranslateTool(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {

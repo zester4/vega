@@ -13,7 +13,8 @@ import {
   ShieldCheckIcon,
   ZapIcon,
   InfoIcon,
-  ChevronRightIcon
+  ChevronRightIcon,
+  LockIcon
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -27,7 +28,7 @@ interface Tool {
   id: string;
   name: string;
   description: string;
-  source: "system" | "user";
+  source: "system" | "user" | "user-private";
   category: string;
   status: "active" | "offline";
   parameters?: {
@@ -179,12 +180,13 @@ function ToolCard({ tool, index }: { tool: Tool, index: number }) {
   const isDestructive = ["delete", "move", "exec", "write"].some(w => tool.name.includes(w) || tool.description.toLowerCase().includes(w));
 
   const Icon = useMemo(() => {
+    if (tool.source === "user-private") return LockIcon;
     if (tool.name.includes("search") || tool.name.includes("fetch")) return GlobeIcon;
     if (tool.name.includes("memory")) return DatabaseIcon;
     if (tool.name.includes("fs") || tool.name.includes("file")) return TerminalIcon;
     if (tool.name.includes("agent") || tool.name.includes("workflow")) return CpuIcon;
     return WrenchIcon;
-  }, [tool.name]);
+  }, [tool.name, tool.source]);
 
   return (
     <motion.div
@@ -196,7 +198,8 @@ function ToolCard({ tool, index }: { tool: Tool, index: number }) {
       className="group relative h-full flex flex-col p-6 rounded-3xl bg-white/[0.02] border border-white/[0.06] hover:bg-white/[0.04] hover:border-[#00e5cc]/30 transition-all duration-500 overflow-hidden"
     >
       {/* Background Accent */}
-      <div className={`absolute -right-10 -top-10 size-20 blur-3xl rounded-full transition-opacity duration-500 ${tool.source === 'system' ? 'bg-[#00e5cc]/20 opacity-0 group-hover:opacity-100' : 'bg-purple-500/20 opacity-0 group-hover:opacity-100'
+      <div className={`absolute -right-10 -top-10 size-20 blur-3xl rounded-full transition-opacity duration-500 ${tool.source === 'system' ? 'bg-[#00e5cc]/20 opacity-0 group-hover:opacity-100' :
+        tool.source === 'user-private' ? 'bg-amber-500/20 opacity-0 group-hover:opacity-100' : 'bg-purple-500/20 opacity-0 group-hover:opacity-100'
         }`} />
 
       {/* Card Header */}
@@ -208,9 +211,11 @@ function ToolCard({ tool, index }: { tool: Tool, index: number }) {
         <div className="flex flex-col items-end gap-1.5">
           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-widest ${tool.source === 'system'
             ? 'bg-[#00e5cc]/10 text-[#00e5cc] border border-[#00e5cc]/20'
-            : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+            : tool.source === 'user-private'
+              ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
+              : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
             }`}>
-            {tool.source === 'system' ? 'System' : 'Custom'}
+            {tool.source === 'system' ? 'System' : tool.source === 'user-private' ? 'Private' : 'Custom'}
           </span>
           {isDestructive && (
             <div className="flex items-center gap-1 text-[9px] font-black text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">

@@ -40,6 +40,7 @@ import {
     WhatsAppClient,
     markdownToWhatsApp,
 } from "../whatsapp";
+import { addPendingItem } from "../vega-state";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -120,25 +121,30 @@ export async function handleCompletionCallback(
     // ── 3. Inject into parent session history so VEGA "sees" it ────────────────
     if (parentSessionId) {
         try {
-            const historyKey = `session:history:${parentSessionId}`;
+            const historyKey = `agent:history:${parentSessionId}`;
             const injectedMessage = {
                 role: "user",
                 parts: [{
-                    text: `[SYSTEM: Background agent '${agentName}' (task: ${taskId}) has completed.\n` +
-                        `Status: ${status}\n` +
-                        `Completed at: ${completedAt}\n\n` +
+                    text: `[Background agent '${agentName}' completed — task ID: ${taskId}]\n` +
+                        `Status: ${status} | Completed: ${completedAt}\n\n` +
                         `Result:\n${result.slice(0, 3000)}` +
-                        (result.length > 3000 ? "\n\n[Result truncated — full output in memory]" : "")
+                        (result.length > 3000
+                            ? `\n\n[Output truncated. Full result at memory key: agent:shared:${payload.memoryPrefix}:result — use read_agent_memory('${payload.memoryPrefix}', 'result') to retrieve it.]`
+                            : ""),
                 }],
-                _injected: true,
-                _agentCompletion: true,
-                _taskId: taskId,
-                _ts: Date.now(),
             };
             await redis.rpush(historyKey, JSON.stringify(injectedMessage)).catch(() => { });
         } catch (e) {
             console.warn(`[CompletionCallback] History injection failed: ${String(e)}`);
         }
+    }
+
+    // ── 4. Add to Cognitive State (surface at next chat) ──────────────────────
+    if (finalUserId) {
+        await addPendingItem(redis, finalUserId, {
+            type: status === "error" ? "agent_error" : "task_complete",
+            summary: `Agent "${agentName}" finished: ${result.slice(0, 120)}`,
+        }).catch(() => { });
     }
 
     if (!finalUserId) {

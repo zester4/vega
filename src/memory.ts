@@ -123,6 +123,48 @@ export async function listTools(redis: Redis): Promise<RegisteredTool[]> {
   return tools.filter(Boolean) as RegisteredTool[];
 }
 
+// ─── User-Scoped Tool Registry ────────────────────────────────────────────────
+// Tools created by a user are private to them. Global tools (builtins) are separate.
+
+export async function registerUserTool(
+  redis: Redis,
+  userId: string,
+  tool: RegisteredTool
+): Promise<void> {
+  await redis.set(`agent:tool:${userId}:${tool.name}`, tool);
+  await redis.sadd(`agent:tools:${userId}`, tool.name);
+}
+
+export async function listUserTools(
+  redis: Redis,
+  userId: string
+): Promise<RegisteredTool[]> {
+  const names = await redis.smembers(`agent:tools:${userId}`);
+  if (!names.length) return [];
+  const tools = await Promise.all(
+    names.map((n) => redis.get<RegisteredTool>(`agent:tool:${userId}:${n}`))
+  );
+  return tools.filter(Boolean) as RegisteredTool[];
+}
+
+export async function getUserTool(
+  redis: Redis,
+  userId: string,
+  name: string
+): Promise<RegisteredTool | null> {
+  return redis.get<RegisteredTool>(`agent:tool:${userId}:${name}`);
+}
+
+export async function deleteUserTool(
+  redis: Redis,
+  userId: string,
+  name: string
+): Promise<boolean> {
+  const deleted = await redis.del(`agent:tool:${userId}:${name}`);
+  await redis.srem(`agent:tools:${userId}`, name);
+  return deleted > 0;
+}
+
 // ─── Tasks ────────────────────────────────────────────────────────────────────
 export async function createTask(redis: Redis, task: Omit<AgentTask, "createdAt">): Promise<void> {
   const full: AgentTask = { ...task, createdAt: Date.now() };

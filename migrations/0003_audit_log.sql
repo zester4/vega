@@ -11,7 +11,7 @@
 --   • Partitioned query access via user_id + created_at index.
 -- ============================================================================
 
-PRAGMA journal_mode = WAL;
+-- PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id             TEXT    NOT NULL PRIMARY KEY,  -- uuid
