@@ -7,7 +7,7 @@ Production-ready AI agent: **Next.js** (Vercel) for the app and auth, **Cloudfla
 ## Architecture
 
 - **Next.js (Vercel)** — App UI, auth (Better Auth + Drizzle + Neon), `/api/*` proxies to Worker. Chat and settings are session-aware; chat history is **persistent per user** when logged in.
-- **Cloudflare Worker** — Agent brain (Gemini), tools, workflows, Telegram webhook. Uses Redis (sessions/history), D1 (per-user Telegram bot configs), QStash (cron + workflows).
+- **Cloudflare Worker** — Agent brain (Gemini), tools, workflows, Telegram webhook, and inbound email. Uses Redis (sessions/history), D1 (configs, vault, audit), R2 (files, screenshots), and QStash (cron + workflows).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -194,6 +194,8 @@ Everything works when:
 | `trigger_workflow` | Launch durable workflows. |
 | `spawn_agent` | Spawn sub-agents (uses QStash; requires correct `QSTASH_URL`). |
 | `store_memory` / `recall_memory` | Redis key-value memory. |
+| `cf_browse_page` | Advanced headless browser with JS rendering. |
+| `set_secret` / `get_secret` | Secure per-user encrypted keys vault. |
 | `create_tool` | Register new tools at runtime. |
 
 ---
