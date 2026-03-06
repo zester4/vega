@@ -17,6 +17,7 @@ import {
   UserIcon,
 } from "lucide-react";
 import { NavItem } from "./nav-item";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
 import { useSidebar } from "./sidebar-context";
@@ -81,45 +82,45 @@ export function Sidebar() {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 border-r border-[#1e1e22] bg-[#0a0a0b]/95 backdrop-blur-md flex flex-col z-40 transition-all duration-300 ease-in-out lg:z-20 lg:translate-x-0 shadow-2xl lg:shadow-none",
+          "fixed inset-y-0 left-0 border-r border-border bg-background/95 backdrop-blur-md flex flex-col z-40 transition-all duration-300 ease-in-out lg:z-20 lg:translate-x-0 shadow-2xl lg:shadow-none",
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
           isCollapsed ? "w-20" : "w-64"
         )}
       >
         {/* Header */}
-        <div className="h-14 border-b border-[#1e1e22] flex items-center justify-between px-4 shrink-0 sticky top-0">
+        <div className="h-14 border-b border-border flex items-center justify-between px-4 shrink-0 sticky top-0">
           {!isCollapsed && (
             <div className="flex items-center gap-2 min-w-0">
-              <div className="flex size-6 items-center justify-center rounded-sm bg-[#00e5cc]">
-                <BotIcon className="size-3.5 text-[#0a0a0b]" />
+              <div className="flex size-6 items-center justify-center rounded-sm bg-primary">
+                <BotIcon className="size-3.5 text-primary-foreground" />
               </div>
-              <span className="text-sm font-bold uppercase tracking-widest text-[#e8e8ea] truncate">
+              <span className="text-sm font-bold uppercase tracking-widest text-foreground truncate">
                 VEGA
               </span>
             </div>
           )}
           {isCollapsed && (
-            <div className="flex size-6 items-center justify-center rounded-sm bg-[#00e5cc] mx-auto">
-              <BotIcon className="size-3.5 text-[#0a0a0b]" />
+            <div className="flex size-6 items-center justify-center rounded-sm bg-primary mx-auto">
+              <BotIcon className="size-3.5 text-primary-foreground" />
             </div>
           )}
 
           <div className="flex items-center gap-1">
             <button
               onClick={() => setIsOpen(false)}
-              className="lg:hidden p-1 rounded-md hover:bg-[#1e1e22] transition-colors"
+              className="lg:hidden p-1 rounded-md hover:bg-secondary transition-colors"
               aria-label="Close sidebar"
             >
-              <XIcon className="size-4 text-[#6b6b7a]" />
+              <XIcon className="size-4 text-muted-foreground" />
             </button>
             <button
               onClick={handleCollapse}
-              className="hidden lg:flex p-1 rounded-md hover:bg-[#1e1e22] transition-colors"
+              className="hidden lg:flex p-1 rounded-md hover:bg-secondary transition-colors"
               aria-label="Toggle sidebar collapse"
             >
               <ChevronLeftIcon
                 className={cn(
-                  "size-4 text-[#6b6b7a] transition-transform",
+                  "size-4 text-muted-foreground transition-transform",
                   isCollapsed && "rotate-180"
                 )}
               />
@@ -178,13 +179,13 @@ export function Sidebar() {
 
         {/* Session History */}
         {!isCollapsed && (
-          <div className="border-t border-[#1e1e22] p-4 shrink-0">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b7a] mb-3">
+          <div className="border-t border-border p-4 shrink-0">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">
               Recent Chats
             </h3>
             <div className="space-y-2 max-h-40 overflow-y-auto scrollbar-thin">
               {recentChats.length === 0 ? (
-                <div className="text-xs text-[#6b6b7a] py-2 px-2 text-center">
+                <div className="text-xs text-muted-foreground py-2 px-2 text-center">
                   No chats yet
                 </div>
               ) : (
@@ -192,7 +193,7 @@ export function Sidebar() {
                   <Link
                     key={chat.id}
                     href={`/chat?session=${chat.sessionId}`}
-                    className="block px-3 py-2 rounded-sm text-xs text-[#6b6b7a] hover:text-[#e8e8ea] hover:bg-[#1e1e22] transition-colors truncate"
+                    className="block px-3 py-2 rounded-sm text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors truncate"
                     title={chat.title}
                   >
                     {chat.title}
@@ -204,9 +205,14 @@ export function Sidebar() {
         )}
 
         {/* Footer */}
-        {!isCollapsed && (
-          <div className="border-t border-[#1e1e22] px-4 py-3 shrink-0 text-xs text-[#6b6b7a]">
+        {!isCollapsed ? (
+          <div className="border-t border-border px-4 py-3 shrink-0 flex items-center justify-between text-xs text-muted-foreground">
             <p>v0.1.0 • Edge AI</p>
+            <ThemeToggle />
+          </div>
+        ) : (
+          <div className="border-t border-border p-3 shrink-0 flex items-center justify-center">
+            <ThemeToggle />
           </div>
         )}
       </aside>

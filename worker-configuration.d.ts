@@ -73,5 +73,10 @@ interface Env {
 
   // ── Misc ─────────────────────────────────────────────────────────────────
   FIRECRAWL_API_KEY?: string;
-
+  // ── NEW bindings ──────────────────
+  VAULT_ENCRYPTION_SECRET: string;   // AES-256-GCM master secret for vault
+  MYBROWSER: Fetcher;                // CF Browser Rendering
+  CF_EMAIL_SENDER: {                 // CF native email send binding
+    send(msg: unknown): Promise<void>;
+  };
 }

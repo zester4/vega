@@ -79,6 +79,12 @@ import type { RegisteredTool } from "../memory";
 import { execLocalFsTool } from "./local-fs";
 import { MESH_TOOL_DECLARATIONS, execMeshTool } from "../agent-mesh";
 
+// ─── NEW IMPORTS FOR 5 FEATURES ───────────────────────────────────────────────
+import { VAULT_TOOL_DECLARATIONS, executeVaultTool } from "../routes/vault";
+import { CF_BROWSER_DECLARATIONS, executeCfBrowserTool } from "./cf-browser";
+import { toolNeedsApproval, requestApproval, waitForApproval } from "../routes/approvals";
+import { insertAuditLog } from "../routes/audit";
+
 // ─── Tool Declarations (Gemini sees these) ────────────────────────────────────
 
 export const BUILTIN_DECLARATIONS = [
@@ -856,6 +862,12 @@ export const BUILTIN_DECLARATIONS = [
 
   ...MESH_TOOL_DECLARATIONS,
 
+  // ── KEYS VAULT (Secure API Key Management) ─────────────────────────────────
+  ...VAULT_TOOL_DECLARATIONS,
+
+  // ── CLOUDFLARE BROWSER RENDERING ───────────────────────────────────────────
+  ...CF_BROWSER_DECLARATIONS,
+
 ] as const;
 
 // ─── Type Helpers ─────────────────────────────────────────────────────────────
@@ -967,6 +979,32 @@ export async function executeTool(
       case "broadcast_to_agents":
       case "get_mesh_topology":
         return await execMeshTool(toolName, args, env);
+
+      // ── Keys Vault (Secure API Key Management) ───────────────────────────────
+      case "set_secret":
+      case "get_secret":
+      case "list_secrets":
+      case "delete_secret":
+        // Vault requires userId - try to get from Redis session mapping
+        let vaultUserId: string | undefined;
+        if (callerSessionId) {
+          const { getRedis } = await import("../memory");
+          const redis = getRedis(env);
+          const mappedUserId = await redis.get(`session:user-map:${callerSessionId}`);
+          if (mappedUserId && typeof mappedUserId === 'string') {
+            vaultUserId = mappedUserId;
+          }
+        }
+        const vaultResult = await executeVaultTool(toolName, args, env, vaultUserId);
+        return vaultResult as unknown as Record<string, unknown>;
+
+      // ── Cloudflare Browser Rendering ────────────────────────────────────────
+      case "cf_browse_page":
+      case "cf_screenshot":
+      case "cf_extract_data":
+      case "cf_fill_form":
+      case "cf_click":
+        return (await executeCfBrowserTool(toolName, args, env)) as Record<string, unknown>;
 
       default: return await execDynamicTool(toolName, args, env);
     }

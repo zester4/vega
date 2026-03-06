@@ -1,34 +1,55 @@
 name = "autonomous-ai-agent"
 main = "src/index.ts"
-compatibility_date = "2024-11-01"
+compatibility_date = "2025-09-15"
 compatibility_flags = ["nodejs_compat"]
 
 # ─── Public vars (not sensitive) ──────────────────────────────────────────────
 [vars]
-# Your URLs
-WORKER_URL = "https://autonomous-ai-agent.adesrnd.workers.dev"
-UPSTASH_WORKFLOW_URL = "https://autonomous-ai-agent.adesrnd.workers.dev" # Must be worker for Upstash
-BRIDGE_URL = "https://vega-ebon.vercel.app" # Next.js bridge (Vercel) for local-fs and other API routes
-QSTASH_URL = "https://qstash-us-east-1.upstash.io" # Regional QStash; use same region as your Upstash project
-# ─── D1 (Telegram configs per user) ─────────────────────────────────────────────
-# 1. Create DB:  npx wrangler d1 create vega-d1
-# 2. Copy the returned database_id into the line below (replace the zeros)
-# 3. Apply schema:  npx wrangler d1 execute vega-d1 --remote --file=./migrations/0000_telegram_configs.sql
+WORKER_URL             = "https://autonomous-ai-agent.adesrnd.workers.dev"
+UPSTASH_WORKFLOW_URL   = "https://autonomous-ai-agent.adesrnd.workers.dev"
+BRIDGE_URL             = "https://vega-ebon.vercel.app"
+QSTASH_URL             = "https://qstash-us-east-1.upstash.io"
+
+# ─── D1 ───────────────────────────────────────────────────────────────────────
+# Contains: telegram_configs, whatsapp_configs, user_secrets, pending_approvals,
+#           audit_log, cf_email_senders
+# Migrations: npx wrangler d1 execute vega-d1 --remote --file=./migrations/<file>.sql
 [[d1_databases]]
-binding         = "DB"
-database_name   = "vega-d1"
-database_id     = "b72e0170-75aa-42c1-8194-7f4588d3dee1"
+binding       = "DB"
+database_name = "vega-d1"
+database_id   = "b72e0170-75aa-42c1-8194-7f4588d3dee1"
 
 # ─── R2 File Storage ──────────────────────────────────────────────────────────
-# Create bucket first: wrangler r2 bucket create vega-agent-files
+# Used by: agent file output, cf_screenshot tool
 [[r2_buckets]]
 binding     = "FILES_BUCKET"
 bucket_name = "vega-agent-files"
 
-# ─── Secrets — set with: wrangler secret put SECRET_NAME ──────────────────────
-# AI & Search
-# GEMINI_API_KEY            → https://aistudio.google.com/apikey
-# SERPER_API_KEY            → https://serper.dev (optional, DuckDuckGo used as fallback)
+# ─── CF Browser Rendering ─────────────────────────────────────────────────────
+# Enables @cloudflare/puppeteer in the Worker.
+# npm install --save-dev @cloudflare/puppeteer
+# Tools: cf_browse_page, cf_screenshot, cf_extract_data, cf_fill_form, cf_click
+[browser]
+binding = "MYBROWSER"
+
+# ─── CF Email Inbound (native ACK replies) ────────────────────────────────────
+# Used ONLY for sending ACK confirmation replies to inbound emails.
+# Substantive outbound email still goes via Resend (send_email tool).
+#
+# Setup:
+#   1. Enable Email Routing in Cloudflare dashboard (Email > Email Routing)
+#   2. Verify at least one destination email address
+#   3. Add a routing rule: vega@yourdomain.com → this Worker
+#   4. Deploy — the email() handler in index.ts fires for every inbound message
+#
+# Note: destination_address is intentionally omitted so we can reply to any sender.
+[[send_email]]
+name = "CF_EMAIL_SENDER"
+
+# ─── Secrets — set with: npx wrangler secret put SECRET_NAME ─────────────────
+
+# Core (required)
+# GEMINI_API_KEY            → https://aistudio.google.com/apikey  [PROTECTED — never in vault]
 
 # Queue & Orchestration
 # QSTASH_TOKEN              → https://console.upstash.com/qstash
@@ -43,18 +64,24 @@ bucket_name = "vega-agent-files"
 # UPSTASH_VECTOR_REST_URL   → https://console.upstash.com/vector
 # UPSTASH_VECTOR_REST_TOKEN
 
-# Code Execution
-# E2B_API_KEY               → https://e2b.dev (for run_code tool)
+# ── NEW: Keys Vault ────────────────────────────────────────────────────────────
+# VAULT_ENCRYPTION_SECRET   → random 32+ char string:  openssl rand -base64 32
+#                             NEVER change this after first user stores a key —
+#                             all existing encrypted values would become unreadable.
+#                             npx wrangler secret put VAULT_ENCRYPTION_SECRET
 
-# Integrations (all optional — tools degrade gracefully without them)
-# GITHUB_TOKEN              → GitHub personal access token (repo scope)
+# Internal auth
+# TELEGRAM_INTERNAL_SECRET  → shared secret Next.js ↔ Worker
+
+# Integrations (optional — tools degrade gracefully)
+# SERPER_API_KEY            → https://serper.dev
 # RESEND_API_KEY            → https://resend.com
-# RESEND_FROM_EMAIL         → Your verified sender email
-# TWILIO_ACCOUNT_SID        → https://console.twilio.com
+# RESEND_FROM_EMAIL         → verified sender for outbound email
+# GITHUB_TOKEN
+# TWILIO_ACCOUNT_SID
 # TWILIO_AUTH_TOKEN
-# TWILIO_FROM_NUMBER        → E.164 format e.g. +1234567890
-# BROWSERLESS_TOKEN         → https://browserless.io (for browse_web tool)
-
-# WhatsApp Business Cloud API (Meta)
-# WHATSAPP_APP_SECRET       → wrangler secret put WHATSAPP_APP_SECRET
-# WHATSAPP_WEBHOOK_VERIFY_TOKEN → wrangler secret put WHATSAPP_WEBHOOK_VERIFY_TOKEN
+# TWILIO_FROM_NUMBER
+# WHATSAPP_APP_SECRET
+# WHATSAPP_WEBHOOK_VERIFY_TOKEN
+# E2B_API_KEY               → https://e2b.dev (code execution sandbox)
+# BROWSERLESS_TOKEN         → https://browserless.io (legacy browse_web fallback)

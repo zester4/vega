@@ -100,7 +100,7 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
 
   return (
     <div className="mb-2">
-      <p className="text-[10px] font-semibold uppercase tracking-widest text-[#6b6b7a] px-1 pb-1">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 pb-1">
         TOOLS ({tools.length})
       </p>
       <div className="space-y-1">
@@ -128,7 +128,7 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
-                className="rounded-lg border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-sm overflow-hidden"
+                className="rounded-lg border border-border bg-card/80 backdrop-blur-sm overflow-hidden"
               >
                 {/* Header */}
                 <button
@@ -140,16 +140,16 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                       <span className="inline-block size-1.5 rounded-full bg-yellow-400 animate-pulse shrink-0" />
                     )}
                     {tool.status === "completed" && (
-                      <span className="inline-block size-1.5 rounded-full bg-[#00e5cc] shrink-0" />
+                      <span className="inline-block size-1.5 rounded-full bg-primary shrink-0" />
                     )}
                     {tool.status === "error" && (
                       <span className="inline-block size-1.5 rounded-full bg-red-500 shrink-0" />
                     )}
-                    <span className="text-[10px] sm:text-xs font-mono text-[#e8e8ea] truncate">
+                    <span className="text-[10px] sm:text-xs font-mono text-foreground truncate">
                       {getToolIcon(tool.name)} {tool.name}
                     </span>
                   </div>
-                  <span className="text-[9px] sm:text-[10px] text-[#6b6b7a] shrink-0 capitalize">
+                  <span className="text-[9px] sm:text-[10px] text-muted-foreground shrink-0 capitalize">
                     {tool.status === "running" ? "running…" : tool.status}
                   </span>
                 </button>
@@ -161,30 +161,30 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                       initial={{ height: 0, opacity: 0 }}
                       animate={{ height: "auto", opacity: 1 }}
                       exit={{ height: 0, opacity: 0 }}
-                      className="border-t border-[#1e1e22] text-[10px] sm:text-xs font-mono overflow-hidden"
+                      className="border-t border-border text-[10px] sm:text-xs font-mono overflow-hidden"
                     >
                       {tool.input && (
-                        <div className="px-3 py-2 border-b border-[#1e1e22] bg-[#0a0a0b]/50">
-                          <p className="text-[10px] text-[#6b6b7a] uppercase mb-1">Params</p>
-                          <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-20 scrollbar-thin">
+                        <div className="px-3 py-2 border-b border-border bg-background/50">
+                          <p className="text-[10px] text-muted-foreground uppercase mb-1">Params</p>
+                          <pre className="text-foreground/70 overflow-x-auto max-h-20 scrollbar-thin">
                             {JSON.stringify(tool.input, null, 2)}
                           </pre>
                         </div>
                       )}
                       {(tool.output || tool.errorText) && (
-                        <div className="px-3 py-2 bg-[#0a0a0b]/50">
+                        <div className="px-3 py-2 bg-background/50">
                           {/* Human approval special-case */}
                           {approval ? (
                             <div className="space-y-2">
-                              <p className="text-[10px] font-semibold text-[#e8e8ea] uppercase">
+                              <p className="text-[10px] font-semibold text-foreground uppercase">
                                 Human Approval Required
                               </p>
                               {approval.operation && (
-                                <p className="text-[10px] text-[#e8e8ea]/80 whitespace-pre-wrap">
+                                <p className="text-[10px] text-foreground/80 whitespace-pre-wrap">
                                   {approval.operation}
                                 </p>
                               )}
-                              <p className="text-[10px] text-[#6b6b7a]">
+                              <p className="text-[10px] text-muted-foreground">
                                 ID:{" "}
                                 <span className="font-mono">
                                   {approval.id ?? "unknown"}
@@ -283,7 +283,7 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                               <p
                                 className={`text-[10px] uppercase mb-1 ${tool.errorText
                                   ? "text-red-400"
-                                  : "text-[#6b6b7a]"
+                                  : "text-muted-foreground"
                                   }`}
                               >
                                 {tool.errorText ? "Error" : "Output"}
@@ -293,7 +293,7 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                                   {tool.errorText}
                                 </pre>
                               ) : (
-                                <pre className="text-[#e8e8ea]/70 overflow-x-auto max-h-24 scrollbar-thin">
+                                <pre className="text-foreground/70 overflow-x-auto max-h-24 scrollbar-thin">
                                   {typeof tool.output === "string"
                                     ? tool.output
                                     : JSON.stringify(tool.output, null, 2)}
@@ -328,11 +328,11 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={copy}
-      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-[#1e1e22] text-[#6b6b7a] hover:text-[#e8e8ea]"
+      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
       title="Copy"
     >
       {copied ? (
-        <span className="text-[10px] text-[#00e5cc]">✓</span>
+        <span className="text-[10px] text-primary">✓</span>
       ) : (
         <CopyIcon className="size-3" />
       )}
@@ -381,12 +381,12 @@ function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: stri
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
   return (
-    <span className="my-2 rounded-xl overflow-hidden border border-[#1e1e22] bg-[#111113] max-w-[400px] block">
+    <span className="my-2 rounded-xl overflow-hidden border border-border bg-card max-w-[400px] block">
       {!error ? (
         <>
           {!loaded && (
-            <span className="h-40 flex items-center justify-center text-[10px] text-[#6b6b7a] gap-2">
-              <span className="inline-block size-2 rounded-full bg-[#00e5cc]/60 animate-pulse" />
+            <span className="h-40 flex items-center justify-center text-[10px] text-muted-foreground gap-2">
+              <span className="inline-block size-2 rounded-full bg-primary/60 animate-pulse" />
               Loading image…
             </span>
           )}
@@ -398,14 +398,14 @@ function InlineImage({ url, alt = "Generated image" }: { url: string; alt?: stri
             className={`w-full object-contain rounded-xl transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0 h-0"}`}
           />
           {loaded && (
-            <span className="flex items-center justify-between px-3 py-1.5 border-t border-[#1e1e22]">
-              <span className="text-[10px] text-[#6b6b7a] truncate max-w-[200px] block">{alt}</span>
+            <span className="flex items-center justify-between px-3 py-1.5 border-t border-border">
+              <span className="text-[10px] text-muted-foreground truncate max-w-[200px] block">{alt}</span>
               <a
                 href={url}
                 download
                 target="_blank"
                 rel="noreferrer"
-                className="text-[10px] text-[#00e5cc] hover:underline shrink-0 ml-2"
+                className="text-[10px] text-primary hover:underline shrink-0 ml-2"
               >
                 ↓ Download
               </a>
@@ -524,7 +524,7 @@ const markdownComponents = {
       return <InlineImage url={href} alt={typeof children === "string" ? children : "Generated image"} />;
     }
     return (
-      <a href={href} target="_blank" rel="noreferrer" className="text-[#00e5cc] underline">
+      <a href={href} target="_blank" rel="noreferrer" className="text-primary underline">
         {children}
       </a>
     );
@@ -546,7 +546,7 @@ function ThinkingDot() {
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className="inline-block size-1.5 rounded-full bg-[#00e5cc]/60 animate-bounce"
+          className="inline-block size-1.5 rounded-full bg-primary/60 animate-bounce"
           style={{ animationDelay: `${i * 0.15}s` }}
         />
       ))}
@@ -975,25 +975,25 @@ function ChatPageContent() {
 
   if (!isMounted || !sessionId) {
     return (
-      <div className="flex h-[100dvh] w-full items-center justify-center bg-[#0a0a0b]">
-        <div className="size-4 rounded-full bg-[#00e5cc] animate-ping" />
+      <div className="flex h-[100dvh] w-full items-center justify-center bg-background">
+        <div className="size-4 rounded-full bg-primary animate-ping" />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a0b] font-mono">
+    <div className="flex flex-col h-full bg-background font-mono">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[#1e1e22] shrink-0">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <div className="size-2 rounded-full bg-[#00e5cc] animate-pulse" />
-          <span className="text-xs font-semibold text-[#e8e8ea] tracking-wider">VEGA</span>
-          <span className="text-[10px] text-[#6b6b7a]">ID: {sessionId.slice(-8).toUpperCase()}</span>
+          <div className="size-2 rounded-full bg-primary animate-pulse" />
+          <span className="text-xs font-semibold text-foreground tracking-wider">VEGA</span>
+          <span className="text-[10px] text-muted-foreground">ID: {sessionId.slice(-8).toUpperCase()}</span>
         </div>
         <button
           onClick={() => router.push(`/chat?session=session-${nanoid(8)}`)}
-          className="text-[#6b6b7a] hover:text-[#e8e8ea] transition-colors"
+          className="text-muted-foreground hover:text-foreground transition-colors"
           title="New session"
         >
           <RefreshCwIcon className="size-3.5" />
@@ -1010,8 +1010,8 @@ function ChatPageContent() {
             transition={{ duration: 0.5 }}
           >
             <div className="text-4xl sm:text-5xl drop-shadow-[0_0_15px_rgba(0,229,204,0.3)]">⚡</div>
-            <p className="text-[#e8e8ea] font-bold tracking-widest text-base sm:text-lg">VEGA CORE ACTIVE</p>
-            <p className="text-[#6b6b7a] text-[11px] sm:text-xs max-w-sm leading-relaxed px-4">
+            <p className="text-foreground font-bold tracking-widest text-base sm:text-lg">VEGA CORE ACTIVE</p>
+            <p className="text-muted-foreground text-[11px] sm:text-xs max-w-sm leading-relaxed px-4">
               Autonomous AI agent with web search, memory, code execution, workflows, and more.
             </p>
           </motion.div>
@@ -1032,7 +1032,7 @@ function ChatPageContent() {
             {msg.role === "user" ? (
               /* User bubble */
               <div className="group max-w-[85%] sm:max-w-[75%] flex flex-row-reverse sm:flex-row items-end sm:items-start gap-1 sm:gap-1.5">
-                <div className="rounded-2xl rounded-br-sm sm:rounded-2xl bg-gradient-to-br from-[#00e5cc]/20 to-[#00e5cc]/5 border border-[#00e5cc]/20 px-3 py-2 sm:px-3 sm:py-2.5 text-[11px] sm:text-xs text-[#e8e8ea] shadow-sm backdrop-blur-sm">
+                <div className="rounded-2xl rounded-br-sm sm:rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 px-3 py-2 sm:px-3 sm:py-2.5 text-[11px] sm:text-xs text-foreground shadow-sm backdrop-blur-sm">
                   {msg.content}
                 </div>
                 <div className="sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
@@ -1052,7 +1052,7 @@ function ChatPageContent() {
                 ))}
                 {/* Response body */}
                 <div className="flex items-start gap-2 sm:gap-2.5">
-                  <div className="border-l-2 border-[#00e5cc]/40 pl-3 py-0.5 text-[11px] sm:text-xs text-[#e8e8ea]/90 flex-1">
+                  <div className="border-l-2 border-primary/40 pl-3 py-0.5 text-[11px] sm:text-xs text-foreground/90 flex-1">
                     <MessageResponse components={markdownComponents}>
                       {msg.content}
                     </MessageResponse>
@@ -1081,7 +1081,7 @@ function ChatPageContent() {
       </div>
 
       {/* ── Input area ─────────────────────────────────────────────────────── */}
-      <div className="shrink-0 bg-gradient-to-t from-[#0a0a0b] via-[#0a0a0b] to-transparent pt-4 sm:pt-6 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe">
+      <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent pt-4 sm:pt-6 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe">
         <div className="max-w-4xl mx-auto">
           <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
             {/* Attachments preview */}
@@ -1090,14 +1090,14 @@ function ChatPageContent() {
                 {attachments.map((a) => (
                   <span
                     key={a.id}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#111113] border border-[#1e1e22] text-[10px] text-[#e8e8ea]"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card border border-border text-[10px] text-foreground"
                   >
-                    <PaperclipIcon className="size-3 text-[#6b6b7a]" />
+                    <PaperclipIcon className="size-3 text-muted-foreground" />
                     <span className="max-w-[140px] truncate">{a.name}</span>
                     <button
                       type="button"
                       onClick={() => handleRemoveAttachment(a.id)}
-                      className="text-[#6b6b7a] hover:text-[#e8e8ea]"
+                      className="text-muted-foreground hover:text-foreground"
                     >
                       <XIcon className="size-3" />
                     </button>
@@ -1106,7 +1106,7 @@ function ChatPageContent() {
               </div>
             )}
 
-            <div className="relative rounded-2xl border border-[#1e1e22] bg-[#111113]/90 backdrop-blur-xl shadow-2xl focus-within:border-[#00e5cc]/50 focus-within:ring-1 focus-within:ring-[#00e5cc]/20 transition-all">
+            <div className="relative rounded-2xl border border-border bg-card/90 backdrop-blur-xl shadow-2xl focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/20 transition-all">
               <textarea
                 ref={textareaRef}
                 value={input}
@@ -1115,13 +1115,13 @@ function ChatPageContent() {
                 placeholder="Message VEGA..."
                 disabled={isLoading}
                 rows={1}
-                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-20 sm:pr-24 text-[13px] sm:text-sm text-[#e8e8ea] placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
+                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-20 sm:pr-24 text-[13px] sm:text-sm text-foreground placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
               />
               <div className="absolute right-1.5 bottom-1.5 sm:right-2 sm:bottom-2 flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl border border-[#1e1e22] bg-[#0a0a0b] text-[#6b6b7a] hover:text-[#e8e8ea] hover:bg-[#1e1e22] transition-all"
+                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-secondary transition-all"
                   title="Attach files"
                 >
                   <PlusIcon className="size-4" />
@@ -1130,7 +1130,7 @@ function ChatPageContent() {
                   type={isLoading ? "button" : "submit"}
                   onClick={isLoading ? stopGeneration : undefined}
                   disabled={!isLoading && !input.trim() && attachments.length === 0}
-                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl bg-[#00e5cc] hover:bg-[#00c4b0] disabled:bg-[#1e1e22] disabled:text-[#6b6b7a] text-[#0a0a0b] transition-all"
+                  className="size-8 sm:size-9 flex items-center justify-center rounded-xl bg-primary hover:bg-[#00c4b0] disabled:bg-secondary disabled:text-muted-foreground text-primary-foreground transition-all"
                 >
                   {isLoading ? (
                     <span className="size-3 sm:size-3.5 rounded-sm bg-current" />
@@ -1151,13 +1151,13 @@ function ChatPageContent() {
 
             {/* Footer status */}
             <div className="flex items-center justify-between px-2 opacity-60">
-              <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono">
-                SESSION: <span className="text-[#00e5cc]">{sessionId.slice(-8).toUpperCase()}</span>{" "}
+              <p className="text-[9px] sm:text-[10px] text-muted-foreground tracking-widest font-mono">
+                SESSION: <span className="text-primary">{sessionId.slice(-8).toUpperCase()}</span>{" "}
                 <span className="hidden sm:inline">[{logCount} LOG ENTRIES]</span>
               </p>
-              <p className="text-[9px] sm:text-[10px] text-[#6b6b7a] tracking-widest font-mono text-right">
+              <p className="text-[9px] sm:text-[10px] text-muted-foreground tracking-widest font-mono text-right">
                 <span className="hidden sm:inline">VEGA CORE ACTIVE.{" "}</span>
-                <span className="text-[#e8e8ea]/40">AI CAN MAKE MISTAKES.</span>
+                <span className="text-foreground/40">AI CAN MAKE MISTAKES.</span>
               </p>
             </div>
           </form>
@@ -1170,8 +1170,8 @@ function ChatPageContent() {
 export default function ChatPage() {
   return (
     <Suspense fallback={
-      <div className="flex h-[100dvh] w-full items-center justify-center bg-[#0a0a0b]">
-        <div className="size-4 rounded-full bg-[#00e5cc] animate-ping" />
+      <div className="flex h-[100dvh] w-full items-center justify-center bg-background">
+        <div className="size-4 rounded-full bg-primary animate-ping" />
       </div>
     }>
       <ChatPageContent />

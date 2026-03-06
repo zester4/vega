@@ -7,14 +7,14 @@ import { motion } from "motion/react";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-[#0a0a0b] text-[#e8e8ea] font-mono selection:bg-[#00e5cc]/30 selection:text-[#00e5cc]">
+    <div className="min-h-screen bg-background text-foreground font-mono selection:bg-primary/30 selection:text-primary transition-colors duration-300">
       {/* ── 1. Hero Section ─────────────────────────────────────────────────── */}
       <section className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden px-6 text-center">
         {/* Particle Grid Background (CSS only) */}
-        <div className="absolute inset-0 z-0 opacity-20"
-          style={{ backgroundImage: "radial-gradient(#1e1e22 1px, transparent 1px)", backgroundSize: "40px 40px" }}>
+        <div className="absolute inset-0 z-0 opacity-10 dark:opacity-20 flex items-center justify-center pointer-events-none"
+          style={{ backgroundImage: "radial-gradient(currentColor 1px, transparent 1px)", backgroundSize: "40px 40px" }}>
         </div>
-        <div className="absolute inset-0 z-0 bg-gradient-to-b from-transparent via-[#0a0a0b]/50 to-[#0a0a0b]"></div>
+        <div className="absolute inset-0 z-0 bg-gradient-to-b from-transparent via-background/50 to-background"></div>
 
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -26,7 +26,7 @@ export default function Home() {
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: 0.2, duration: 0.5 }}
-            className="mb-6 inline-flex items-center gap-2 rounded-full border border-[#1e1e22] bg-[#111113]/80 px-4 py-1.5 text-[10px] sm:text-xs uppercase tracking-[0.2em] text-[#6b6b7a] shadow-xl backdrop-blur-sm"
+            className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-card/80 px-4 py-1.5 text-[10px] sm:text-xs uppercase tracking-[0.2em] text-muted-foreground shadow-xl backdrop-blur-sm transition-colors"
           >
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#00e5cc] opacity-75"></span>
@@ -38,7 +38,7 @@ export default function Home() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.4, duration: 0.6 }}
-            className="mb-4 text-6xl font-bold tracking-tighter sm:text-8xl md:text-9xl bg-clip-text text-transparent bg-gradient-to-b from-white to-[#6b6b7a]"
+            className="mb-4 text-6xl font-bold tracking-tighter sm:text-8xl md:text-9xl bg-clip-text text-transparent bg-gradient-to-b from-foreground to-muted-foreground"
           >
             VEGA
           </motion.h1>
@@ -47,7 +47,7 @@ export default function Home() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.6, duration: 0.6 }}
-            className="mb-10 max-w-lg mx-auto text-xs uppercase tracking-[0.2em] sm:tracking-[0.3em] text-[#6b6b7a] sm:text-sm px-4"
+            className="mb-10 max-w-lg mx-auto text-xs uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground sm:text-sm px-4"
           >
             Autonomous · Self-scheduling · Always-on
           </motion.p>
@@ -60,7 +60,7 @@ export default function Home() {
           >
             <Link
               href="/chat"
-              className="group relative flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-[#00e5cc] px-8 text-xs font-bold uppercase tracking-widest text-[#0a0a0b] transition-all hover:bg-[#00e5cc]/90 hover:shadow-[0_0_30px_rgba(0,229,204,0.3)] hover:-translate-y-0.5 sm:w-auto"
+              className="group relative flex h-14 w-full items-center justify-center overflow-hidden rounded-lg bg-primary px-8 text-xs font-bold uppercase tracking-widest text-[#0a0a0b] transition-all hover:bg-primary/90 hover:shadow-[0_0_30px_rgba(0,229,204,0.3)] hover:-translate-y-0.5 sm:w-auto"
             >
               <span className="relative z-10">→ Chat</span>
             </Link>
@@ -68,7 +68,7 @@ export default function Home() {
             <a
               href="https://github.com/zester4/vega"
               target="_blank"
-              className="flex h-14 w-full items-center justify-center rounded-lg border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-sm px-8 text-xs font-bold uppercase tracking-widest transition-all hover:bg-[#1e1e22] hover:text-[#00e5cc] hover:-translate-y-0.5 sm:w-auto"
+              className="flex h-14 w-full items-center justify-center rounded-lg border border-border bg-card/80 backdrop-blur-sm px-8 text-xs font-bold uppercase tracking-widest transition-all hover:bg-secondary hover:text-primary hover:-translate-y-0.5 sm:w-auto"
             >
               View Repository
             </a>
@@ -76,7 +76,7 @@ export default function Home() {
         </motion.div>
 
         <div className="absolute bottom-10 z-10 animate-bounce">
-          <div className="h-10 w-[1px] bg-gradient-to-b from-[#00e5cc] to-transparent"></div>
+          <div className="h-10 w-[1px] bg-gradient-to-b from-primary to-transparent"></div>
         </div>
       </section>
 
@@ -88,8 +88,8 @@ export default function Home() {
           viewport={{ once: true }}
           className="mb-16 text-center"
         >
-          <h2 className="mb-4 text-xs font-bold uppercase tracking-[0.3em] sm:tracking-[0.4em] text-[#00e5cc]">Core Capabilities</h2>
-          <p className="text-xl sm:text-2xl font-semibold tracking-tight text-[#e8e8ea]">Equipped for Autonomous Success</p>
+          <h2 className="mb-4 text-xs font-bold uppercase tracking-[0.3em] sm:tracking-[0.4em] text-primary">Core Capabilities</h2>
+          <p className="text-xl sm:text-2xl font-semibold tracking-tight text-foreground">Equipped for Autonomous Success</p>
         </motion.div>
 
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -127,7 +127,7 @@ export default function Home() {
       </section>
 
       {/* ── 3. Footer ───────────────────────────────────────────────────────── */}
-      <footer className="border-t border-[#1e1e22] bg-[#0a0a0b] px-6 py-12">
+      <footer className="border-t border-border bg-background px-6 py-12 transition-colors">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-8 sm:flex-row">
           <div className="flex items-center gap-4 grayscale opacity-50 transition-all hover:grayscale-0 hover:opacity-100">
             <span className="text-[10px] font-bold uppercase tracking-widest text-[#6b6b7a]">Built with</span>
@@ -136,10 +136,10 @@ export default function Home() {
             <span className="text-xs font-bold">Gemini</span>
           </div>
 
-          <div className="flex gap-6 text-[10px] font-bold uppercase tracking-widest text-[#6b6b7a]">
-            <Link href="/chat" className="hover:text-[#00e5cc]">Chat</Link>
-            <a href="#" className="hover:text-[#00e5cc]">Docs</a>
-            <a href="#" className="hover:text-[#00e5cc]">GitHub</a>
+          <div className="flex gap-6 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            <Link href="/chat" className="hover:text-primary">Chat</Link>
+            <a href="#" className="hover:text-primary">Docs</a>
+            <a href="#" className="hover:text-primary">GitHub</a>
           </div>
         </div>
       </footer>
@@ -155,18 +155,18 @@ function CapabilityCard({ icon, title, description }: { icon: React.ReactNode, t
       viewport={{ once: true, margin: "-50px" }}
       whileHover={{ y: -5 }}
       transition={{ duration: 0.4 }}
-      className="group relative overflow-hidden rounded-xl border border-[#1e1e22] bg-[#111113]/80 backdrop-blur-md p-6 sm:p-8 transition-colors hover:border-[#00e5cc]/50 hover:bg-[#111113]"
+      className="group relative overflow-hidden rounded-xl border border-border bg-card/80 backdrop-blur-md p-6 sm:p-8 transition-colors hover:border-primary/50 hover:bg-card"
     >
-      <div className="mb-6 inline-flex size-12 items-center justify-center rounded-lg bg-[#0a0a0b] text-[#00e5cc] ring-1 ring-[#1e1e22] group-hover:ring-[#00e5cc]/50 group-hover:scale-110 transition-all duration-300 shadow-md">
+      <div className="mb-6 inline-flex size-12 items-center justify-center rounded-lg bg-background text-primary ring-1 ring-border group-hover:ring-primary/50 group-hover:scale-110 transition-all duration-300 shadow-md">
         {icon}
       </div>
-      <h3 className="mb-3 text-sm font-bold uppercase tracking-widest text-[#e8e8ea]">{title}</h3>
-      <p className="text-sm leading-relaxed text-[#6b6b7a] group-hover:text-[#a1a1aa] transition-colors">
+      <h3 className="mb-3 text-sm font-bold uppercase tracking-widest text-foreground">{title}</h3>
+      <p className="text-sm leading-relaxed text-muted-foreground group-hover:text-foreground transition-colors">
         {description}
       </p>
 
       {/* Accent glow on hover */}
-      <div className="absolute -bottom-24 -right-24 size-48 rounded-full bg-[#00e5cc] opacity-0 blur-[80px] transition-opacity duration-500 group-hover:opacity-10"></div>
+      <div className="absolute -bottom-24 -right-24 size-48 rounded-full bg-primary opacity-0 blur-[80px] transition-opacity duration-500 group-hover:opacity-10 dark:group-hover:opacity-10"></div>
     </motion.div>
   );
 }

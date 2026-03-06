@@ -58,6 +58,14 @@ import {
 } from "./whatsapp";
 import { handleCompletionCallback } from "./routes/completion-callback";
 
+// ─── NEW IMPORTS FOR 5 FEATURES ───────────────────────────────────────────────
+import vaultRoutes from "./routes/vault";
+import approvalsRoutes from "./routes/approvals";
+import auditRoutes from "./routes/audit";
+import cfEmailRoutes from "./routes/cf-email-inbound";
+import { handleCfEmailInbound } from "./routes/cf-email-inbound";
+import { handleApprovalCallback } from "./routes/approvals";
+
 const app = new Hono<{ Bindings: Env }>();
 
 // ─── CORS middleware ──────────────────────────────────────────────────────────
@@ -84,6 +92,11 @@ app.get("/health", (c) =>
       "headless_browser",
       "semantic_memory",
       "durable_workflows",
+      "keys_vault",
+      "approval_gates",
+      "audit_log",
+      "cf_browser_rendering",
+      "cf_email_inbound",
     ],
   })
 );
@@ -864,6 +877,30 @@ app.post("/telegram/webhook", async (c) => {
   const config = secretHeader
     ? await getTelegramConfigBySecret(c.env, secretHeader)
     : null;
+
+  // Get the Telegram update first
+  let update: unknown;
+  try {
+    update = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+
+  // Check for callback_query (approval button taps) FIRST
+  if (update && typeof update === "object" && "callback_query" in update) {
+    const callbackData = (update as { callback_query: { data?: string } }).callback_query?.data;
+    if (callbackData && (callbackData.startsWith("approve:") || callbackData.startsWith("deny:"))) {
+      // Handle approval callback BEFORE regular message handling
+      const handled = await handleApprovalCallback(
+        c.env.DB,
+        c.env,
+        (update as { callback_query: unknown }).callback_query as Parameters<typeof handleApprovalCallback>[2]
+      );
+      if (handled) return c.json({ ok: true });
+    }
+  }
+
+  // Continue with normal Telegram message handling
   if (!config) {
     const legacy = await getTelegramConfig(c.env);
     if (!legacy) {
@@ -872,8 +909,7 @@ app.post("/telegram/webhook", async (c) => {
     const ok = secretHeader ? verifyWebhookSecret(secretHeader, legacy.secret) : false;
     if (!ok) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const update = await c.req.json();
-      c.executionCtx.waitUntil(handleTelegramUpdate(update, c.env, legacy));
+      c.executionCtx.waitUntil(handleTelegramUpdate(update as Parameters<typeof handleTelegramUpdate>[0], c.env, legacy));
       return c.json({ ok: true });
     } catch {
       return c.json({ error: "Invalid JSON" }, 400);
@@ -883,8 +919,7 @@ app.post("/telegram/webhook", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
   try {
-    const update = await c.req.json();
-    c.executionCtx.waitUntil(handleTelegramUpdate(update, c.env, config));
+    c.executionCtx.waitUntil(handleTelegramUpdate(update as Parameters<typeof handleTelegramUpdate>[0], c.env, config));
     return c.json({ ok: true });
   } catch (err) {
     console.error("[Telegram Webhook] Error parsing JSON:", err);
@@ -1571,4 +1606,26 @@ app.delete("/tools/:name", async (c) => {
   }
 });
 
-export default app;
+// ─── NEW ROUTE REGISTRATIONS ─────────────────────────────────────────────────
+app.route("/vault", vaultRoutes);
+app.route("/approvals", approvalsRoutes);
+app.route("/audit", auditRoutes);
+app.route("/cf-email", cfEmailRoutes);
+
+// ─── Telegram Webhook: Handle Approval Callbacks ──────────────────────────────
+// This is integrated into the existing Telegram webhook handler below.
+// See the handleTelegramUpdate call in the Telegram webhook section.
+
+// ─── Default Export with Email Handler ────────────────────────────────────────
+interface SendEmail {
+  send(message: unknown): Promise<void>;
+}
+
+export default {
+  // Hono handles all HTTP fetch() calls
+  fetch: app.fetch.bind(app),
+
+  // CF Email Routing: fires for every inbound email to vega@yourdomain.com
+  // Wire up in Cloudflare Dashboard: Email > Email Routing > Email Workers
+  email: handleCfEmailInbound,
+};

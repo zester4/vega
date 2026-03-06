@@ -43,10 +43,13 @@
     "execa": "^9.6.1",
     "hono": "^4.12.3",
     "lucide-react": "^0.575.0",
+    "mimetext": "^3.0.28",
     "motion": "^12.34.3",
     "nanoid": "^5.1.6",
     "next": "16.1.6",
+    "next-themes": "^0.4.6",
     "playwright": "^1.58.2",
+    "postal-mime": "^2.7.3",
     "radix-ui": "^1.4.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -60,6 +63,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/workers-types": "^4.20260305.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",

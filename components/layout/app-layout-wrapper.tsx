@@ -21,7 +21,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -10 }}
           transition={{ duration: 0.3, ease: "easeInOut" }}
-          className="min-h-screen bg-[#0a0a0b]"
+          className="min-h-screen bg-background transition-colors duration-300"
         >
           <main>{children}</main>
         </motion.div>
@@ -39,7 +39,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -10 }}
           transition={{ duration: 0.3, ease: "easeInOut" }}
-          className="min-h-screen bg-[#0a0a0b]"
+          className="min-h-screen bg-background transition-colors duration-300"
         >
           <main>{children}</main>
         </motion.div>
@@ -50,7 +50,7 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
   // Authenticated shell: sidebar + main area
   return (
     <SidebarProvider>
-      <div className="flex h-[100dvh] bg-[#0a0a0b] overflow-hidden">
+      <div className="flex h-[100dvh] bg-background transition-colors duration-300 overflow-hidden">
         <Sidebar />
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <MobileNav />
@@ -71,4 +71,5 @@ export function AppLayoutWrapper({ children }: { children: React.ReactNode }) {
     </SidebarProvider>
   );
 }
+
 
