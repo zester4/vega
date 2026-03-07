@@ -650,46 +650,34 @@ function ChatPageContent() {
     } catch { /* ignore */ }
   }, [sessionId]);
 
-  // ── Poll for pending sub-agent results ──────────────────────────────────────
+  // ── Poll for background completions (image/voice/sub-agents) ────────────────
 
   useEffect(() => {
     if (!sessionId) return;
 
-    const checkPending = async () => {
+    const poll = async () => {
       try {
-        const res = await fetch(`/api/agents/pending-pushes?session=${sessionId}`);
+        const res = await fetch(`/api/agents/pending-pushes?session=${encodeURIComponent(sessionId)}`);
         if (!res.ok) return;
-        const data = (await res.json()) as {
-          pushes?: Array<{
-            type: string;
-            agentName: string;
-            status: string;
-            message: string;
-            ts: number;
-          }>;
-        };
-
-        if (data.pushes && data.pushes.length > 0) {
-          const newMessages: ChatMessage[] = data.pushes.map((push) => ({
-            id: nanoid(),
-            role: "assistant" as const,
-            content: push.message,
-            timestamp: push.ts ?? Date.now(),
-          }));
-
+        const data = await res.json() as { pushes?: any[] };
+        const pushes = data.pushes;
+        if (pushes?.length && pushes.length > 0) {
           setMessages((prev) => {
+            const newMessages = pushes.map((push: any) => ({
+              id: `push-${push.ts ?? Date.now()}-${nanoid(4)}`,
+              role: "assistant" as const,
+              content: push.message,
+              timestamp: push.ts ?? Date.now(),
+            }));
             const updated = [...prev, ...newMessages];
             setTimeout(() => persistMessages(updated), 0);
             return updated;
           });
         }
-      } catch (err) {
-        console.warn("[pending-pushes check failed]", err);
-      }
+      } catch { /* non-fatal */ }
     };
 
-    checkPending();
-    const interval = setInterval(checkPending, 15_000);
+    const interval = setInterval(poll, 5000);
     return () => clearInterval(interval);
   }, [sessionId, persistMessages]);
 

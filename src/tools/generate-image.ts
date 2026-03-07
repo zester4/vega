@@ -51,7 +51,8 @@ export async function execGenerateImage(
   if (sessionId && env.QSTASH_TOKEN && workerUrl && qstashUrl) {
     const taskId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     // Extract userId for completion-callback push (format: "user-{userId}")
-    const userId = sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null;
+    const userId = (args._userId as string | undefined) ??
+      (sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null);
 
     try {
       const { Client: QStashClient } = await import("@upstash/qstash");
@@ -67,8 +68,8 @@ export async function execGenerateImage(
         status: "pending",
       });
 
-      // Strip the injected _sessionId before forwarding args to /run-media
-      const { _sessionId: _drop, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown };
+      // Strip the injected _sessionId and _userId before forwarding args to /run-media
+      const { _sessionId: _drop, _userId: _dropUser, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown; _userId?: unknown };
 
       await qstash.publishJSON({
         url: `${workerUrl.replace(/\/$/, "")}/run-media`,

@@ -101,6 +101,13 @@ export async function handleCompletionCallback(
         finalUserId = parentSessionId.replace("user-", "");
     }
 
+    if (!finalUserId && parentSessionId) {
+        // Covers Telegram (tg-...) and WhatsApp (wa-...) sessions that stored
+        // their userId in the session:user-map when the session was created.
+        const mapped = await redis.get(`session:user-map:${parentSessionId}`) as string | null;
+        if (mapped) finalUserId = mapped;
+    }
+
     // Fallback: look up the session-to-user mapping stored by the /chat proxy
     // This handles the common case where the UI session is "session-XXXXXXXX" (nanoid)
     // and was mapped to a userId during authentication.

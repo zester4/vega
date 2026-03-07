@@ -34,9 +34,10 @@ export async function POST(req: NextRequest) {
 
     const res = await fetch(`${workerBase}/chat`, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
         ...(stream && { "x-stream": "true" }),
+        "X-User-Id": session.user.id,
       },
       body: JSON.stringify(body as Record<string, unknown>),
     });

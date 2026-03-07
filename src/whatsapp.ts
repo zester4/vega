@@ -585,6 +585,8 @@ async function processWhatsAppMessage(
     if (!sessionId) {
         sessionId = `wa-${config.userId}-${from}-${Date.now()}`;
         await redis.set(sessionKey, sessionId);
+        // Write reverse map so completion callbacks can resolve userId
+        await redis.set(`session:user-map:${sessionId}`, config.userId, { ex: 60 * 60 * 24 * 30 });
     }
 
     // ── Extract user text from different message types ─────────────────────────

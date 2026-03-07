@@ -72,7 +72,8 @@ export async function execTextToSpeech(
 
   if (sessionId && env.QSTASH_TOKEN && workerUrl && qstashUrl) {
     const taskId = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const userId = sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null;
+    const userId = (args._userId as string | undefined) ??
+      (sessionId.startsWith("user-") ? sessionId.replace("user-", "") : null);
 
     try {
       const { Client: QStashClient } = await import("@upstash/qstash");
@@ -87,7 +88,7 @@ export async function execTextToSpeech(
         status: "pending",
       });
 
-      const { _sessionId: _drop, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown };
+      const { _sessionId: _drop, _userId: _dropUser, ...cleanArgs } = args as Record<string, unknown> & { _sessionId?: unknown; _userId?: unknown };
 
       await qstash.publishJSON({
         url: `${workerUrl.replace(/\/$/, "")}/run-media`,

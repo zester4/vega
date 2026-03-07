@@ -34,9 +34,18 @@ export type AgentTask = {
   error?: string;
 };
 
-// ─── Redis factory ────────────────────────────────────────────────────────────
+// ─── Redis singleton (one client per Worker invocation) ───────────────────────
+// CF Workers re-instantiate the module on every invocation, so this cache
+// lives only for the lifetime of one request — no stale-client risk.
+// WeakMap key = env object (unique per invocation), value = Redis client.
+const _redisCache = new WeakMap<object, Redis>();
+
 export function getRedis(env: Env): Redis {
-  return Redis.fromEnv(env);
+  const cached = _redisCache.get(env as object);
+  if (cached) return cached;
+  const client = Redis.fromEnv(env);
+  _redisCache.set(env as object, client);
+  return client;
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────

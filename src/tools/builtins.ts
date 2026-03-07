@@ -94,6 +94,37 @@ import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "../routes/trigger
 import { PROFILE_TOOL_DECLARATIONS, executeProfileTool } from "../routes/profile";
 import { CAPTCHA_TOOL_DECLARATIONS, executeCaptchaTool } from "./captcha";
 
+// ─── Tool Usage Batching ──────────────────────────────────────────────────────
+// In-process tool usage accumulator
+// Flushed to Redis at end of executeTool() — one write per invocation
+// instead of one write per tool call.
+const _toolUsageBuffer = new Map<string, number>();
+let _toolUsageFlushScheduled = false;
+
+function recordToolUsage(toolName: string, env: Env): void {
+  _toolUsageBuffer.set(toolName, (_toolUsageBuffer.get(toolName) ?? 0) + 1);
+  if (_toolUsageFlushScheduled) return;
+  _toolUsageFlushScheduled = true;
+  // Flush after current call stack completes — batches all usage in this invocation
+  Promise.resolve().then(async () => {
+    _toolUsageFlushScheduled = false;
+    if (!_toolUsageBuffer.size) return;
+    try {
+      const { getRedis } = await import("../memory");
+      const redis = getRedis(env);
+      const pipeline = redis.pipeline();
+      for (const [name, count] of _toolUsageBuffer) {
+        pipeline.incrby(`agent:tool-usage:${name}`, count);
+        pipeline.expire(`agent:tool-usage:${name}`, 60 * 60 * 24); // 24h window
+      }
+      _toolUsageBuffer.clear();
+      await pipeline.exec();
+    } catch { // non-fatal
+      _toolUsageBuffer.clear();
+    }
+  });
+}
+
 // ─── Tool Declarations (Gemini sees these) ────────────────────────────────────
 
 export const BUILTIN_DECLARATIONS = [
@@ -983,16 +1014,8 @@ export async function executeTool(
   const startMs = Date.now();
 
   try {
-    // Track tool usage for self-evolution heuristics
-    try {
-      const { getRedis } = await import("../memory");
-      const redis = getRedis(env);
-      const key = `agent:tool-usage:${toolName}`;
-      await redis.incr(key);
-      await redis.expire(key, 60 * 60 * 24);
-    } catch (usageErr) {
-      console.warn("[ToolUsage] Failed to record usage:", String(usageErr));
-    }
+    // Batched — flushed once per invocation via Promise microtask
+    recordToolUsage(toolName, env);
 
     // ── Approval Gate ─────────────────────────────────────────────────────────
     if (toolNeedsApproval(toolName, args)) {
@@ -1011,14 +1034,17 @@ export async function executeTool(
       const decision = await waitForApproval(env.DB, approvalId, args);
       if (!decision.approved) {
         // Log the denial
-        insertAuditLog(env.DB, {
-          userId: resolvedUserId,
-          sessionId: callerSessionId ?? "unknown",
-          toolName,
-          args,
-          denied: true,
-          durationMs: Date.now() - startMs,
-        }).catch(e => console.warn("[audit]", e));
+        // Truly fire-and-forget: schedule after current tick so it never blocks
+        Promise.resolve().then(() =>
+          insertAuditLog(env.DB, {
+            userId: resolvedUserId,
+            sessionId: callerSessionId ?? "unknown",
+            toolName,
+            args,
+            denied: true,
+            durationMs: Date.now() - startMs,
+          }).catch(() => { })
+        );
 
         return {
           error: `Tool '${toolName}' was denied by the user: ${decision.reason}`,
@@ -1033,27 +1059,33 @@ export async function executeTool(
     const result = await executeToolInner(toolName, args, env, callerSessionId, resolvedUserId);
 
     // ── Audit: success ────────────────────────────────────────────────────────
-    insertAuditLog(env.DB, {
-      userId: resolvedUserId ?? null,
-      sessionId: callerSessionId ?? "unknown",
-      toolName,
-      args,
-      result,
-      durationMs: Date.now() - startMs,
-    }).catch(e => console.warn("[audit]", e));
+    // Truly fire-and-forget
+    Promise.resolve().then(() =>
+      insertAuditLog(env.DB, {
+        userId: resolvedUserId ?? null,
+        sessionId: callerSessionId ?? "unknown",
+        toolName,
+        args,
+        result,
+        durationMs: Date.now() - startMs,
+      }).catch(() => { })
+    );
 
     return result;
 
   } catch (e) {
     // ── Audit: error ──────────────────────────────────────────────────────────
-    insertAuditLog(env.DB, {
-      userId: resolvedUserId ?? null,
-      sessionId: callerSessionId ?? "unknown",
-      toolName,
-      args,
-      error: String(e),
-      durationMs: Date.now() - startMs,
-    }).catch(() => { });
+    // Truly fire-and-forget
+    Promise.resolve().then(() =>
+      insertAuditLog(env.DB, {
+        userId: resolvedUserId ?? null,
+        sessionId: callerSessionId ?? "unknown",
+        toolName,
+        args,
+        error: String(e),
+        durationMs: Date.now() - startMs,
+      }).catch(() => { })
+    );
 
     return { error: `Tool '${toolName}' threw: ${String(e)}`, toolName };
   }
@@ -1067,16 +1099,6 @@ async function executeToolInner(
   resolvedUserId?: string
 ): Promise<Record<string, unknown>> {
   try {
-    // Track tool usage for self-evolution heuristics
-    try {
-      const { getRedis } = await import("../memory");
-      const redis = getRedis(env);
-      const key = `agent:tool-usage:${toolName}`;
-      await redis.incr(key);
-      await redis.expire(key, 60 * 60 * 24); // 24h window
-    } catch (usageErr) {
-      console.warn("[ToolUsage] Failed to record usage:", String(usageErr));
-    }
 
     switch (toolName) {
 

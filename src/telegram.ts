@@ -885,7 +885,7 @@ async function processMessage(
     // and store userId -> chatId mapping for proactive notifications
     if (config.userId) {
         await Promise.all([
-            redis.set(`session:user-map:${sessionId}`, config.userId, { ex: 60 * 60 * 24 }),
+            redis.set(`session:user-map:${sessionId}`, config.userId, { ex: 60 * 60 * 24 * 30 }),
             redis.set(`telegram:chat-id:${config.userId}`, String(chatId), { ex: 60 * 60 * 24 * 7 })
         ]);
     }

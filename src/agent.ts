@@ -518,9 +518,21 @@ async function agenticLoop(
           // Inject _sessionId for async-capable long-running tools.
           // generate_image and text_to_speech use this to publish to /run-media
           // via QStash instead of blocking the SSE stream for 20-90 seconds.
-          const toolArgs = (fc.name === "generate_image" || fc.name === "text_to_speech")
-            ? { ...fc.args, _sessionId: sessionId }
-            : fc.args;
+          let toolArgs = fc.args;
+          if (fc.name === "generate_image" || fc.name === "text_to_speech") {
+            // Resolve userId: try session format first, then Redis user-map
+            let resolvedUserId: string | null = sessionId.startsWith("user-")
+              ? sessionId.replace("user-", "")
+              : null;
+            if (!resolvedUserId) {
+              resolvedUserId = await redis.get(`session:user-map:${sessionId}`) as string | null;
+            }
+            toolArgs = {
+              ...fc.args,
+              _sessionId: sessionId,
+              ...(resolvedUserId ? { _userId: resolvedUserId } : {}),
+            };
+          }
 
           try {
             // Emit tool-start event for frontend
