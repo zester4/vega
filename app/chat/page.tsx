@@ -17,14 +17,21 @@ import { nanoid } from "nanoid";
 import {
   ArrowUpIcon,
   AudioLinesIcon,
+  CheckIcon,
   CopyIcon,
+  MenuIcon,
   PaperclipIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
   XIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { MessageResponse } from "@/components/ai-elements/message";
+import { MessageResponse, MessageActions, MessageAction } from "@/components/ai-elements/message";
+import { useSidebar } from "@/components/layout/sidebar-context";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +49,7 @@ interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   tools?: ToolCall[];       // tool calls that happened during this assistant turn
+  attachments?: AttachmentPayload[]; // attachments for this message
   timestamp: number;
 }
 
@@ -315,28 +323,61 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
   );
 }
 
-// ─── Copy Button ──────────────────────────────────────────────────────────────
+// ─── Action Components ────────────────────────────────────────────────────────
 
-function CopyButton({ text }: { text: string }) {
+function useCopyToClipboard(text: string) {
   const [copied, setCopied] = useState(false);
-  const copy = () => {
+  const copy = useCallback(() => {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setTimeout(() => setCopied(false), 2000);
     });
-  };
+  }, [text]);
+  return { copied, copy };
+}
+
+function UserMessageActions({ text }: { text: string }) {
+  const { copied, copy } = useCopyToClipboard(text);
+
   return (
-    <button
-      onClick={copy}
-      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
-      title="Copy"
-    >
-      {copied ? (
-        <span className="text-[10px] text-primary">✓</span>
-      ) : (
-        <CopyIcon className="size-3" />
-      )}
-    </button>
+    <MessageActions className="opacity-50 hover:opacity-100 transition-opacity">
+      <MessageAction tooltip="Edit message" onClick={() => console.log("Edit not implemented")}>
+        <PencilIcon className="size-3.5" />
+      </MessageAction>
+      <MessageAction tooltip="Copy text" onClick={copy}>
+        {copied ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
+      </MessageAction>
+    </MessageActions>
+  );
+}
+
+function AssistantMessageActions({ text }: { text: string }) {
+  const { copied, copy } = useCopyToClipboard(text);
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+
+  return (
+    <MessageActions className="opacity-50 hover:opacity-100 transition-opacity mt-1">
+      <MessageAction tooltip="Copy text" onClick={copy}>
+        {copied ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
+      </MessageAction>
+      <MessageAction
+        tooltip="Good response"
+        onClick={() => setFeedback("up")}
+        className={feedback === "up" ? "text-primary" : ""}
+      >
+        <ThumbsUpIcon className="size-3.5" />
+      </MessageAction>
+      <MessageAction
+        tooltip="Bad response"
+        onClick={() => setFeedback("down")}
+        className={feedback === "down" ? "text-red-400" : ""}
+      >
+        <ThumbsDownIcon className="size-3.5" />
+      </MessageAction>
+      <MessageAction tooltip="Regenerate response" onClick={() => console.log("Regenerate not implemented")}>
+        <RotateCcwIcon className="size-3.5" />
+      </MessageAction>
+    </MessageActions>
   );
 }
 
@@ -559,6 +600,7 @@ function ThinkingDot() {
 function ChatPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { setIsOpen } = useSidebar();
 
   const [isMounted, setIsMounted] = useState(false);
   const [sessionId, setSessionId] = useState<string>("");
@@ -695,6 +737,12 @@ function ChatPageContent() {
       id: nanoid(),
       role: "user",
       content: text.trim(),
+      attachments: attachments.length > 0 ? attachments.map(a => ({
+        id: a.id,
+        name: a.name,
+        mimeType: a.mimeType,
+        data: a.data
+      })) : undefined,
       timestamp: Date.now(),
     };
 
@@ -974,17 +1022,27 @@ function ChatPageContent() {
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
-        <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="VEGA" className="size-4 rounded-md object-contain" />
-          <span className="text-xs font-semibold text-foreground tracking-wider">VEGA</span>
-          <span className="text-[10px] text-muted-foreground">ID: {sessionId.slice(-8).toUpperCase()}</span>
+        <div className="flex items-center gap-2 sm:gap-3">
+          <button
+            onClick={() => setIsOpen(true)}
+            className="lg:hidden p-1.5 -ml-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+            title="Open sidebar"
+          >
+            <MenuIcon className="size-4" />
+          </button>
+          <div className="flex items-center gap-2">
+            <div className="size-2 rounded-full bg-primary animate-pulse hidden sm:block" />
+            <span className="text-xs font-semibold text-foreground tracking-wider">VEGA</span>
+          </div>
+          <span className="text-[10px] text-muted-foreground hidden sm:inline-block">ID: {sessionId.slice(-8).toUpperCase()}</span>
         </div>
         <button
           onClick={() => router.push(`/chat?session=session-${nanoid(8)}`)}
-          className="text-muted-foreground hover:text-foreground transition-colors"
+          className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
           title="New session"
         >
           <RefreshCwIcon className="size-3.5" />
+          <span className="text-[10px] font-semibold uppercase hidden sm:block">New session</span>
         </button>
       </div>
 
@@ -997,7 +1055,7 @@ function ChatPageContent() {
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
           >
-            <img src="/logo.png" alt="VEGA" className="size-16 sm:size-20 rounded-2xl shadow-[0_0_20px_rgba(0,229,204,0.4)]" />
+            <div className="text-4xl sm:text-5xl drop-shadow-[0_0_15px_rgba(0,229,204,0.3)]">⚡</div>
             <p className="text-foreground font-bold tracking-widest text-base sm:text-lg">VEGA CORE ACTIVE</p>
             <p className="text-muted-foreground text-[11px] sm:text-xs max-w-sm leading-relaxed px-4">
               Autonomous AI agent with web search, memory, code execution, workflows, and more.
@@ -1019,12 +1077,31 @@ function ChatPageContent() {
           >
             {msg.role === "user" ? (
               /* User bubble */
-              <div className="group max-w-[85%] sm:max-w-[75%] flex flex-row-reverse sm:flex-row items-end sm:items-start gap-1 sm:gap-1.5">
-                <div className="rounded-2xl rounded-br-sm sm:rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 px-3 py-2 sm:px-3 sm:py-2.5 text-[11px] sm:text-xs text-foreground shadow-sm backdrop-blur-sm">
-                  {msg.content}
+              <div className="group max-w-[85%] sm:max-w-[75%] flex flex-col sm:flex-row items-end sm:items-start gap-1 sm:gap-1.5">
+                <div className="flex flex-col gap-2 items-end sm:items-start order-1 sm:order-2">
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 justify-end sm:justify-start">
+                      {msg.attachments.map((at) => (
+                        at.mimeType.startsWith("image/") && (
+                          <div key={at.id} className="relative group/img overflow-hidden rounded-xl border border-primary/20 bg-secondary/30 backdrop-blur-sm">
+                            <img
+                              src={at.data}
+                              alt={at.name}
+                              className="max-h-48 sm:max-h-64 w-auto object-contain cursor-pointer transition-transform hover:scale-[1.02]"
+                            />
+                          </div>
+                        )
+                      ))}
+                    </div>
+                  )}
+                  {msg.content && (
+                    <div className="rounded-2xl rounded-br-sm sm:rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 px-3 py-2 sm:px-3 sm:py-2.5 text-[11px] sm:text-xs text-foreground shadow-sm backdrop-blur-sm">
+                      {msg.content}
+                    </div>
+                  )}
                 </div>
-                <div className="sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                  <CopyButton text={msg.content} />
+                <div className="order-2 sm:order-1 self-end sm:self-start">
+                  <UserMessageActions text={msg.content} />
                 </div>
               </div>
             ) : (
@@ -1039,16 +1116,13 @@ function ChatPageContent() {
                   <InlineImage key={`img-${i}`} url={img.url} alt={img.alt} />
                 ))}
                 {/* Response body */}
-                <div className="flex items-start gap-2 sm:gap-2.5">
-                  <div className="border-l-2 border-primary/40 pl-3 py-0.5 text-[11px] sm:text-xs text-foreground/90 flex-1">
+                <div className="flex flex-col gap-1 items-start">
+                  <div className="border-l-2 border-primary/40 pl-3 py-0.5 text-[11px] sm:text-xs text-foreground/90 w-full">
                     <MessageResponse components={markdownComponents}>
                       {msg.content}
                     </MessageResponse>
-
                   </div>
-                  <div className="opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-                    <CopyButton text={msg.content} />
-                  </div>
+                  <AssistantMessageActions text={msg.content} />
                 </div>
               </div>
             )}
@@ -1074,22 +1148,32 @@ function ChatPageContent() {
           <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
             {/* Attachments preview */}
             {attachments.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1">
+              <div className="flex flex-wrap gap-2 px-1 pb-2">
                 {attachments.map((a) => (
-                  <span
-                    key={a.id}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card border border-border text-[10px] text-foreground"
-                  >
-                    <PaperclipIcon className="size-3 text-muted-foreground" />
-                    <span className="max-w-[140px] truncate">{a.name}</span>
+                  <div key={a.id} className="relative group">
+                    <div className="size-16 sm:size-20 rounded-xl border border-border overflow-hidden bg-secondary/30 backdrop-blur-sm shadow-sm ring-1 ring-primary/5">
+                      {a.mimeType.startsWith("image/") ? (
+                        <img
+                          src={a.data}
+                          alt={a.name}
+                          className="size-full object-cover transition-transform group-hover:scale-105"
+                        />
+                      ) : (
+                        <div className="size-full flex flex-col items-center justify-center p-1 text-center">
+                          <PaperclipIcon className="size-4 text-muted-foreground mb-1" />
+                          <span className="text-[8px] text-muted-foreground truncate w-full px-1">{a.name}</span>
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => handleRemoveAttachment(a.id)}
-                      className="text-muted-foreground hover:text-foreground"
+                      className="absolute -top-1.5 -right-1.5 size-5 flex items-center justify-center rounded-full bg-background border border-border text-muted-foreground hover:text-foreground hover:bg-secondary shadow-md transition-all z-10"
+                      title="Remove"
                     >
                       <XIcon className="size-3" />
                     </button>
-                  </span>
+                  </div>
                 ))}
               </div>
             )}

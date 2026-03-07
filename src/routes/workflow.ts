@@ -77,6 +77,8 @@ export type AgentConfig = {
    * During sleep ZERO CPU is held — the CF Worker exits and QStash wakes it.
    */
   sleepBetweenStepsSec?: number;
+  /** Full system prompt to use. If null, falls back to buildSubAgentPrompt(). */
+  systemPrompt?: string | null;
 };
 
 export type WorkflowPayload = {
@@ -231,7 +233,7 @@ async function handleSubAgent(
     const { buildSubAgentPrompt } = await import("./subagent");
 
     const history = await getHistory(redis, `subagent-${taskId}`);
-    const systemPrompt = buildSubAgentPrompt(agentConfig);
+    const systemPrompt = agentConfig.systemPrompt ?? buildSubAgentPrompt(agentConfig);
 
     // Build initial contents: recent history + the current instruction
     const contents: unknown[] = [
@@ -396,7 +398,9 @@ async function handleSubAgent(
   }
 
   // ── Finalise: write results, push back to parent user ──────────────────────
-  await context.run("wf-finalize", async () => {
+
+  // wf-finalize: ONLY pure state writes — no external HTTP calls
+  const finalizeResult = await context.run("wf-finalize", async () => {
     // BUG FIX: read finalText from Redis state, NOT the local variable.
     // On QStash replay, local variables reset to "" — only Redis state survives.
     const stateRaw = await redis.get<WfState | string>(stateKey);
@@ -462,23 +466,43 @@ async function handleSubAgent(
       }
     }
 
-    // ── CRITICAL FIX: Fire completion callback to push result back to user ──
-    // This replaces the old /webhook/task-complete that just stored to Redis
-    // and nobody consumed. Now we actively push the result to the parent session.
-    await fireCompletionCallback(env, {
-      taskId,
-      agentName: agentConfig.name,
-      parentSessionId: agentConfig.parentSessionId,
-      userId: agentConfig.userId ?? null,
-      memoryPrefix: agentConfig.memoryPrefix,
-      status: "done",
-      result,
-      completedAt,
-    });
-
-    console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) DONE. Parent notified.`);
-    return { done: true, completedAt };
+    console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) finalized in Redis.`);
+    // Return the data needed for notification — NOT calling fireCompletionCallback here
+    return { result, completedAt, done: true };
   });
+
+  // ── Notify user OUTSIDE context.run() ─────────────────────────────────────────
+  // fireCompletionCallback uses fetch() to the same Worker URL.
+  // Inside context.run(), Upstash SDK intercepts that fetch as a QStash message
+  // which QStash can't route → 404 / error 1042.
+  // Outside any step, it's a plain CF subrequest — works correctly.
+  //
+  // Dedup key prevents double-sending if this outer block runs on replay.
+  const notifyDedup = `wf:notified:${taskId}`;
+  const alreadyNotified = await redis.get(notifyDedup).catch(() => null);
+
+  if (!alreadyNotified) {
+    await redis.set(notifyDedup, "1", { ex: 60 * 60 * 24 }).catch(() => { });
+    try {
+      // Direct call — no HTTP. fireCompletionCallback uses fetch() to the same Worker URL
+      // which the Upstash Workflow SDK intercepts as a step callback → 404 / error 1042.
+      // Importing and calling the handler function directly bypasses the SDK entirely.
+      const { handleCompletionCallback } = await import("./completion-callback");
+      await handleCompletionCallback({
+        taskId,
+        agentName: agentConfig.name,
+        parentSessionId: agentConfig.parentSessionId,
+        userId: agentConfig.userId ?? undefined,
+        memoryPrefix: agentConfig.memoryPrefix,
+        status: "done",
+        result: finalizeResult.result,
+        completedAt: finalizeResult.completedAt,
+      }, env);
+      console.log(`[SubAgent WF] ${taskId} (${agentConfig.name}) DONE. Parent notified.`);
+    } catch (e) {
+      console.warn(`[SubAgent WF] Completion callback failed: ${String(e)}`);
+    }
+  }
 }
 
 // ─── Completion Callback Helper ───────────────────────────────────────────────

@@ -700,64 +700,71 @@ async function processWhatsAppMessage(
         statusMsgId = statusRes.messages?.[0]?.id ?? null;
     } catch { /* non-fatal */ }
 
-    // ── Run the VEGA agent ─────────────────────────────────────────────────────
-    const { runAgent } = await import("./agent");
+    // ── Dispatch to durable workflow — same pattern as Telegram ──────────────
+    // runAgent() directly here times out inside waitUntil for complex tasks.
+    // Workflow gives each iteration its own fresh CF Worker invocation.
+    const { Client: QStashClient } = await import("@upstash/qstash");
+    const workerBase = (env.UPSTASH_WORKFLOW_URL ?? env.WORKER_URL ?? "").replace(/\/$/, "");
 
-    const toolsUsed: string[] = [];
-    let reply: string;
+    const taskId = `wa-task-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
     try {
-        reply = await runAgent(
-            env,
-            sessionId,
-            userText,
-            undefined,
-            (event) => {
-                if (event.type === "tool-start") toolsUsed.push(event.data.name);
-            }
-        );
-    } catch (e) {
-        console.error(`[WhatsApp] Agent error for ${from}:`, e);
-        await client.sendText(from, `❌ Error: ${String(e).slice(0, 200)}`);
-        return;
+        const qstash = new QStashClient({
+            token: env.QSTASH_TOKEN,
+            baseUrl: env.QSTASH_URL,
+        });
+
+        // Cache delivery info in Redis so completion-callback can push the result back
+        // without needing D1. D1 bindings are unavailable in workflow context.env.
+        const deliveryKey = `wa:delivery:${config.userId}`;
+        await redis.set(deliveryKey, JSON.stringify(config), { ex: 60 * 60 * 24 * 30 }).catch(() => { });
+
+        // Build the full VEGA system prompt (includes live goals context)
+        const { buildSystemPrompt } = await import("./agent");
+        const built = await buildSystemPrompt(env, config.userId).catch(() => null);
+
+        await qstash.publishJSON({
+            url: `${workerBase}/workflow`,
+            body: {
+                taskId,
+                sessionId,               // wa-{userId}-{from}-{timestamp}
+                taskType: "sub_agent",
+                instructions: userText,
+                agentConfig: {
+                    name: `wa-agent-${from}`,
+                    allowedTools: null,
+                    memoryPrefix: `wa-${config.userId}-${from}`,
+                    notifyEmail: null,
+                    spawnedAt: new Date().toISOString(),
+                    parentAgent: "whatsapp-webhook",
+                    parentSessionId: sessionId,  // completion-callback parses 'from' from this
+                    userId: config.userId ?? null,
+                    systemPrompt: built?.prompt ?? null,
+                },
+            },
+        });
+
+        console.log(`[WhatsApp] Dispatched workflow ${taskId} for ${from}`);
+
+    } catch (dispatchErr) {
+        console.error("[WhatsApp] Workflow dispatch failed:", String(dispatchErr));
+        await client.sendText(from, "⚠️ Failed to start. Please try again.").catch(() => { });
     }
 
-    // ── Send reply ─────────────────────────────────────────────────────────────
-    const voiceEnabled = await redis.get(`wa:voice:${from}`) as string | null;
-
-    if (voiceEnabled && reply.length <= 1500) {
-        // Voice reply
-        try {
-            const { generateSpeechBytes } = await import("./tools/voice");
-            const audioBytes = await generateSpeechBytes(reply, env);
-            if (audioBytes) {
-                await client.sendText(from, markdownToWhatsApp(reply));
-                // Note: WAV→OGG conversion would be needed for proper voice messages
-                // For now send as text + indicate audio was generated
-            } else {
-                await sendWhatsAppReply(from, reply, client);
-            }
-        } catch {
-            await sendWhatsAppReply(from, reply, client);
-        }
-    } else {
-        await sendWhatsAppReply(from, reply, client);
-    }
-
-    // ── Record activity ────────────────────────────────────────────────────────
+    // Write activity log BEFORE returning (completion-callback uses this as fallback)
     const activityKey = `wa:activity:${config.userId}`;
-    try {
-        await redis.lpush(activityKey, JSON.stringify({
-            from,
-            contactName,
-            messagePreview: userText.slice(0, 100),
-            replyPreview: reply.slice(0, 100),
-            wasAudio: isAudio,
-            toolsUsed: toolsUsed.slice(0, 5),
-            ts: Date.now(),
-        }));
-        await redis.ltrim(activityKey, 0, 49);
-    } catch { /* non-fatal */ }
+    const { getRedis: _getRedis } = await import("./memory");
+    const redis2 = _getRedis(env);
+    await redis2.lpush(activityKey, JSON.stringify({
+        from,
+        contactName,
+        messagePreview: userText.slice(0, 100),
+        ts: Date.now(),
+    })).catch(() => { });
+    await redis2.ltrim(activityKey, 0, 49).catch(() => { });
+
+    // Also write the session→user mapping so completion-callback can resolve userId
+    await redis2.set(`session:user-map:${sessionId}`, config.userId, { ex: 60 * 60 * 24 * 30 }).catch(() => { });
 }
 
 // ─── Helper: send reply (splits if needed) ────────────────────────────────────

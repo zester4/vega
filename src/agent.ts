@@ -120,7 +120,7 @@ You are fully autonomous, self-improving, and self-aware. Think strategically, a
 /**
  * Build the system prompt dynamically — appends active high-priority goals.
  */
-async function buildSystemPrompt(env: Env, userId?: string): Promise<{
+export async function buildSystemPrompt(env: Env, userId?: string): Promise<{
   prompt: string;
   state: ReturnType<typeof import("./vega-state").getVegaState> | any;
   temporal: ReturnType<typeof buildTemporalContext> | null;
@@ -568,7 +568,10 @@ async function agenticLoop(
 
       console.log(`[Agent step ${step}] All ${toolResults.length} tools completed`);
 
-      // Short-circuit async media in web chat too
+      // ── ASYNC MEDIA SHORT-CIRCUIT ─────────────────────────────────────────────
+      // If generate_image or text_to_speech queued to /run-media, stop here.
+      // The /run-media handler will fire completion-callback when done.
+      // This prevents the SSE stream from hanging for 90s.
       const asyncMediaResult = toolResults.find(
         (r) =>
           (r.name === "generate_image" || r.name === "text_to_speech") &&

@@ -36,6 +36,8 @@ import {
     deleteTelegramConfigByUserId as dbDeleteByUserId,
     type TelegramConfigRow,
 } from "./db/queries";
+import { Client as QStashClient } from "@upstash/qstash";
+import type { WorkflowPayload } from "./routes/workflow";
 
 // ─── Telegram API Types ───────────────────────────────────────────────────────
 
@@ -981,92 +983,54 @@ async function processMessage(
         } catch { /* non-fatal */ }
     }
 
-    // ── Progress message ──────────────────────────────────────────────────────────
-    await bot.sendChatAction(chatId, "typing");
-    let progressMsg: TelegramMessage | null = null;
-    const activeTools: string[] = [];
-    const completedTools: string[] = [];
-    let lastEditTs = 0;
-
-    const voicePreamble = transcribedVoice
-        ? `🎙️ <b>Heard:</b> <blockquote>${escapeHtml(fullMessage.slice(0, 200))}${fullMessage.length > 200 ? "…" : ""}</blockquote>`
-        : undefined;
-
-    try {
-        progressMsg = await bot.sendMessage(
-            chatId,
-            buildProgressMessage([], [], voicePreamble ?? undefined),
-            { parse_mode: "HTML" }
-        );
-    } catch { /* non-fatal */ }
-
-    const updateProgressMessage = async (toolName: string, status: "start" | "done" | "error") => {
-        if (!progressMsg) return;
-        const now = Date.now();
-        if (now - lastEditTs < 900) return;
-        lastEditTs = now;
-
-        if (status === "start") {
-            activeTools.push(toolName);
-        } else {
-            const idx = activeTools.lastIndexOf(toolName);
-            if (idx !== -1) activeTools.splice(idx, 1);
-            if (!completedTools.includes(toolName)) completedTools.push(toolName);
-        }
-
-        const msgText = buildProgressMessage(activeTools, completedTools, voicePreamble ?? undefined);
-        try {
-            await bot.editMessageText(chatId, progressMsg.message_id, msgText, { parse_mode: "HTML" });
-        } catch { /* ignore edit errors */ }
-    };
-
-    // Dispatch to durable workflow — each iteration runs in its own CF Worker invocation.
-    // waitUntil budget is now used for < 200ms (QStash publish only), not the full agent run.
+    // ── Dispatch to durable workflow ───────────────────────────────────────────
     const taskId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const workerBase = ((env as any).UPSTASH_WORKFLOW_URL ?? (env as any).WORKER_URL ?? "").replace(/\/$/, "");
+    const workerBase = (env.UPSTASH_WORKFLOW_URL ?? env.WORKER_URL ?? "").replace(/\/$/, "");
 
     try {
-        const { Client: QStashClient } = await import("@upstash/qstash");
         const qstash = new QStashClient({
             token: env.QSTASH_TOKEN,
             baseUrl: env.QSTASH_URL,
         });
 
+        // Cache delivery info in Redis so completion-callback can push the result back
+        // without needing D1. D1 bindings are unavailable in workflow context.env.
+        const deliveryKey = `tg:delivery:${config.userId}`;
+        await redis.set(deliveryKey, JSON.stringify({
+            token: config.token,
+            chatId: chatId,
+        }), { ex: 60 * 60 * 24 * 30 }).catch(() => { });
+
+        // Build the full VEGA system prompt (includes live goals context)
+        const { buildSystemPrompt } = await import("./agent");
+        const built = await buildSystemPrompt(env, config.userId).catch(() => null);
+
         await qstash.publishJSON({
             url: `${workerBase}/workflow`,
             body: {
                 taskId,
-                sessionId,           // tg-{chatId}-{timestamp}  — already set above
+                sessionId,
                 taskType: "sub_agent",
                 instructions: fullMessage,
                 agentConfig: {
                     name: `tg-agent-${chatId}`,
-                    allowedTools: null,    // full tool access
+                    allowedTools: null,
                     memoryPrefix: `tg-${chatId}`,
                     notifyEmail: null,
                     spawnedAt: new Date().toISOString(),
                     parentAgent: "telegram-webhook",
                     parentSessionId: sessionId,
-                    userId: config.userId ?? null,  // critical — completion-callback uses this to push back
+                    userId: config.userId ?? null,
+                    systemPrompt: built?.prompt ?? null,
                 },
-            },
+            } satisfies WorkflowPayload,
         });
 
-        // Optional: typing indicator while workflow runs
         await bot.sendChatAction(chatId, "typing").catch(() => { });
-
-        // fireCompletionCallback() in workflow.ts wf-finalize will push the result
-        // back to Telegram via proactive_notify when the workflow completes.
-
     } catch (dispatchErr) {
         console.error("[Telegram] Workflow dispatch failed:", String(dispatchErr));
-        if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
-        // Fallback: send error to user so they're not left hanging
         await bot.sendMessage(chatId, "⚠️ I had trouble starting that. Please try again.").catch(() => { });
-        return;
     }
-
-    if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
 
     // ── Log activity ──────────────────────────────────────────────────────────────
     const activityKey = config.userId ? `tg:activity:${config.userId}` : "tg:activity";
@@ -1076,7 +1040,7 @@ async function processMessage(
             username: msg.from?.username ?? `user_${msg.from?.id}`,
             firstName: msg.from?.first_name,
             messagePreview: fullMessage.slice(0, 100),
-            replyPreview: "Workflow dispatched",
+            replyPreview: "(Workflow dispatched)",
             wasVoice: transcribedVoice,
             detectedLang,
             ts: Date.now(),

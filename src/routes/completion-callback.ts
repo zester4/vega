@@ -71,8 +71,8 @@ export async function handleCompletionCallback(
     const isError = status === "error";
     const icon = isError ? "❌" : "✅";
     const pushMessage = isError
-        ? `${icon} *Agent '${agentName}' failed*\n\n${result.slice(0, 500)}`
-        : `${icon} *Agent '${agentName}' completed*\n\n${result.length > 1500 ? result.slice(0, 1500) + "\n\n_...truncated. Full result stored in memory._" : result}`;
+        ? `${icon} *Agent '${agentName}' failed*\n\n${result}`
+        : `${icon} *Agent '${agentName}' completed*\n\n${result}`;
 
     const pushMsgData = {
         type: "assistant",
@@ -161,7 +161,7 @@ export async function handleCompletionCallback(
     }
 
     // ── 5. Push via Telegram (if connected) ────────────────────────────────────
-    await pushViaTelegram(env, redis, finalUserId, pushMessage, taskId, agentName, memoryPrefix).catch((e) =>
+    await pushViaTelegram(env, redis, finalUserId, pushMessage, taskId, agentName, parentSessionId).catch((e) =>
         console.warn(`[CompletionCallback] Telegram push failed: ${String(e)}`)
     );
 
@@ -180,128 +180,102 @@ async function pushViaTelegram(
     message: string,
     taskId: string,
     agentName: string,
-    memoryPrefix: string
+    parentSessionId: string | null
 ): Promise<void> {
-    const db = (env as { DB?: D1Database }).DB;
-    if (!db) return;
-
-    const { getTelegramConfigByUserId } = await import("../db/queries");
-    const tgConfig = await getTelegramConfigByUserId(db, userId).catch(() => null);
-    if (!tgConfig?.token) return;
-
-    const activityKey = `tg:activity:${userId}`;
-    const recent = await redis.lrange(activityKey, 0, 0) as string[];
-    if (!recent.length) return;
-
+    // Use Redis cache — D1 is unavailable in workflow context.env (not JSON-serializable via QStash)
+    const deliveryRaw = await redis.get<string>(`tg:delivery:${userId}`).catch(() => null);
+    let token: string | null = null;
     let chatId: number | null = null;
-    try {
-        chatId = (JSON.parse(recent[0]) as { chatId: number }).chatId;
-    } catch { return; }
-    if (!chatId) return;
 
-    const { markdownToHtml: markdownToTelegramHtml, TelegramBot } = await import("../telegram");
-    const bot = new TelegramBot(tgConfig.token);
-
-    // ── Detect media URLs broadly (any /files/ path with a media extension) ──
-    const MEDIA_REGEX = /https?:\/\/[^\s)<>"]+\/files\/([^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp|wav|mp3|ogg|mp4))/gi;
-    const audioExts = new Set([".wav", ".mp3", ".ogg"]);
-    const imageExts = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-
-    const audioFiles: string[] = [];   // R2 keys
-    const imageFiles: string[] = [];   // R2 keys
-
-    let match;
-    while ((match = MEDIA_REGEX.exec(message)) !== null) {
-        const r2Key = match[1];  // path after /files/
-        const ext = r2Key.slice(r2Key.lastIndexOf(".")).toLowerCase();
-        if (audioExts.has(ext)) audioFiles.push(r2Key);
-        else if (imageExts.has(ext)) imageFiles.push(r2Key);
+    if (deliveryRaw) {
+        try {
+            const d = typeof deliveryRaw === "string" ? JSON.parse(deliveryRaw) : deliveryRaw as { token: string; chatId: number };
+            token = d.token;
+            chatId = d.chatId;
+        } catch { /* noop */ }
     }
 
-    // Strip all media URLs and their markdown wrappers from the text message
+    // Fallback: parse chatId from parentSessionId "tg-{chatId}-{timestamp}"
+    if (!chatId && parentSessionId?.startsWith("tg-")) {
+        const m = parentSessionId.match(/^tg-(-?\d+)-\d+$/);
+        if (m) chatId = parseInt(m[1], 10);
+    }
+
+    // Fallback: activity log for chatId
+    if (!chatId) {
+        const recent = await redis.lrange(`tg:activity:${userId}`, 0, 0) as string[];
+        if (recent.length) {
+            try { chatId = (JSON.parse(recent[0]) as { chatId: number }).chatId; } catch { /* noop */ }
+        }
+    }
+
+    if (!token || !chatId) {
+        console.log(`[CompletionCallback] Missing token=${!!token} or chatId=${chatId} for user ${userId}`);
+        return;
+    }
+
+    // Convert markdown → Telegram HTML
+    const { markdownToHtml: markdownToTelegramHtml, TelegramBot } = await import("../telegram");
+
+    const audioUrls: string[] = [];
+    const imageUrls: string[] = [];
+    const audioRegex = /https?:\/\/[^\s)]+\/files\/voice\/[^\s)]+\.wav/gi;
+    const imageRegex = /https?:\/\/[^\s)]+\/files\/generated\/[^\s)]+\.(?:png|jpg|jpeg)/gi;
+
+    let m;
+    while ((m = audioRegex.exec(message)) !== null) audioUrls.push(m[0]);
+    while ((m = imageRegex.exec(message)) !== null) imageUrls.push(m[0]);
+
     let cleanMessage = message;
-    const allMediaRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp|wav|mp3|ogg|mp4)/gi;
-    const foundUrls: string[] = [];
-    let urlMatch;
-    while ((urlMatch = allMediaRegex.exec(message)) !== null) foundUrls.push(urlMatch[0]);
-    for (const url of foundUrls) {
-        const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        cleanMessage = cleanMessage
-            .replace(new RegExp(`!\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")
-            .replace(new RegExp(`\\[[^\\]]*\\]\\(${escaped}\\)`, "gi"), "")
-            .replace(new RegExp(escaped, "gi"), "");
+    for (const url of [...audioUrls, ...imageUrls]) {
+        const mdRegex = new RegExp(`!\\[[^\\]]*\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "gi");
+        cleanMessage = cleanMessage.replace(mdRegex, "").replace(url, "");
     }
     cleanMessage = cleanMessage.replace(/\n{3,}/g, "\n\n").trim();
 
-    // Send text (if anything left)
     const htmlMessage = markdownToTelegramHtml(cleanMessage);
+    const bot = new TelegramBot(token);
+
     if (htmlMessage.trim()) {
-        const sendRes = await fetch(
-            `https://api.telegram.org/bot${tgConfig.token}/sendMessage`,
-            {
+        // Split into 4000-char chunks — Telegram's limit is 4096
+        const { splitMessageSafe } = await import("../telegram");
+        const chunks = splitMessageSafe(htmlMessage, 4000);
+
+        for (const chunk of chunks) {
+            const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     chat_id: chatId,
-                    text: htmlMessage,
+                    text: chunk,
                     parse_mode: "HTML",
                     disable_web_page_preview: true,
                 }),
+            });
+            if (!sendRes.ok) {
+                const err = await sendRes.json() as { description?: string };
+                console.warn(`[CompletionCallback] Telegram send failed: ${err.description}`);
             }
+        }
+    }
+
+    for (const audioUrl of audioUrls) {
+        await bot.sendVoice(chatId, audioUrl, { caption: `🔊 ${agentName}` }).catch((e) =>
+            console.warn(`[CompletionCallback] Voice send failed: ${String(e)}`)
         );
-        if (!sendRes.ok) {
-            const err = await sendRes.json() as { description?: string };
-            console.warn(`[CompletionCallback] Telegram text send failed: ${err.description}`);
-        }
     }
 
-    // Send audio files — read directly from R2, no HTTP self-call
-    for (const r2Key of audioFiles) {
+    for (const imageUrl of imageUrls) {
         try {
-            const obj = env.FILES_BUCKET ? await (env.FILES_BUCKET as R2Bucket).get(r2Key) : null;
-            if (!obj) {
-                console.warn(`[CompletionCallback] Audio not found in R2: ${r2Key}`);
-                continue;
-            }
-            const audioBytes = new Uint8Array(await obj.arrayBuffer());
-            await bot.sendVoice(chatId, audioBytes, { caption: `🔊 ${agentName}` });
+            const imgRes = await fetch(imageUrl);
+            const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
+            await bot.sendPhoto(chatId, imageBytes, `🎨 ${agentName}`);
         } catch (e) {
-            console.warn(`[CompletionCallback] Audio send failed for ${r2Key}:`, String(e));
+            console.warn(`[CompletionCallback] Photo send failed: ${String(e)}`);
         }
     }
 
-    // Send image files — read directly from R2, no HTTP self-call
-    for (const r2Key of imageFiles) {
-        try {
-            const obj = env.FILES_BUCKET ? await (env.FILES_BUCKET as R2Bucket).get(r2Key) : null;
-            if (!obj) {
-                console.warn(`[CompletionCallback] Image not found in R2: ${r2Key}`);
-                continue;
-            }
-            const imageBytes = new Uint8Array(await obj.arrayBuffer());
-            const ext = r2Key.slice(r2Key.lastIndexOf(".") + 1).toLowerCase();
-            const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
-                : ext === "gif" ? "image/gif"
-                    : ext === "webp" ? "image/webp"
-                        : "image/png";
-            const form = new FormData();
-            form.append("chat_id", String(chatId));
-            form.append("photo", new Blob([imageBytes], { type: mime }), `image.${ext}`);
-            form.append("caption", `🎨 ${agentName}`);
-            const res = await fetch(
-                `https://api.telegram.org/bot${tgConfig.token}/sendPhoto`,
-                { method: "POST", body: form }
-            );
-            if (!res.ok) {
-                const err = await res.json() as { description?: string };
-                console.warn(`[CompletionCallback] Photo send failed: ${err.description}`);
-            }
-        } catch (e) {
-            console.warn(`[CompletionCallback] Image send failed for ${r2Key}:`, String(e));
-        }
-    }
-
-    console.log(`[CompletionCallback] ✅ Pushed to Telegram chat ${chatId} for user ${userId} (audio: ${audioFiles.length}, images: ${imageFiles.length})`);
+    console.log(`[CompletionCallback] ✅ Pushed to Telegram chat ${chatId} for user ${userId}`);
 }
 
 // ─── WhatsApp Push ────────────────────────────────────────────────────────────
@@ -312,23 +286,48 @@ async function pushViaWhatsApp(
     message: string,
     parentSessionId: string | null
 ): Promise<void> {
-    const waConfig = await getWhatsAppConfigForUser(env, userId);
-    if (!waConfig) return;
-
+    const { getRedis } = await import("../memory");
     const redis = getRedis(env);
 
-    // Find the most recent WhatsApp sender for this user
-    const activityKey = `wa:activity:${userId}`;
-    const recent = await redis.lrange(activityKey, 0, 0) as string[];
-    if (!recent.length) return;
+    // Use Redis cache — D1 is unavailable in workflow context.env
+    const deliveryRaw = await redis.get<string>(`wa:delivery:${userId}`).catch(() => null);
+    let waConfig: any = null;
 
+    if (deliveryRaw) {
+        try {
+            waConfig = typeof deliveryRaw === "string" ? JSON.parse(deliveryRaw) : deliveryRaw;
+        } catch { /* noop */ }
+    }
+
+    if (!waConfig) {
+        const { getWhatsAppConfigForUser } = await import("../whatsapp");
+        waConfig = await getWhatsAppConfigForUser(env, userId).catch(() => null);
+    }
+
+    if (!waConfig) return;
+
+    // FIX: Extract senderPhone directly from parentSessionId: "wa-{userId}-{from}-{timestamp}"
+    // The 'from' is always numeric (phone number) and timestamp is always 13 digits.
     let senderPhone: string | null = null;
-    try {
-        const item = JSON.parse(recent[0]) as { from: string };
-        senderPhone = item.from;
-    } catch { return; }
+    if (parentSessionId?.startsWith("wa-")) {
+        // Strip "wa-" prefix and the trailing 13-digit timestamp
+        const inner = parentSessionId.slice(3).replace(/-\d{13}$/, ""); // → "{userId}-{from}"
+        const m = inner.match(/-(\d+)$/);
+        if (m) senderPhone = m[1];
+    }
+    // Fall back to activity log
+    if (!senderPhone) {
+        const redis = getRedis(env);
+        const recent = await redis.lrange(`wa:activity:${userId}`, 0, 0) as string[];
+        if (recent.length) {
+            try { senderPhone = (JSON.parse(recent[0]) as { from: string }).from; } catch { /* noop */ }
+        }
+    }
 
-    if (!senderPhone) return;
+    if (!senderPhone) {
+        console.log(`[CompletionCallback] Could not resolve WhatsApp sender for user ${userId}`);
+        return;
+    }
 
     const client = new WhatsAppClient(waConfig.phoneNumberId, waConfig.accessToken);
     await client.sendText(senderPhone, markdownToWhatsApp(message));

@@ -74,7 +74,7 @@ export const MessageActions = ({
   children,
   ...props
 }: MessageActionsProps) => (
-  <div className={cn("flex items-center gap-1", className)} {...props}>
+  <div className={cn("flex items-center flex-wrap gap-1 sm:gap-2", className)} {...props}>
     {children}
   </div>
 );
