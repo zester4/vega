@@ -1020,203 +1020,53 @@ async function processMessage(
         } catch { /* ignore edit errors */ }
     };
 
-    const { runAgent } = await import("./agent");
-    const generatedImages: Array<{ url: string; description: string; mimeType: string }> = [];
-    const tgAttachments = (msg as any)._vega_attachment ? [(msg as any)._vega_attachment] : undefined;
+    // Dispatch to durable workflow — each iteration runs in its own CF Worker invocation.
+    // waitUntil budget is now used for < 200ms (QStash publish only), not the full agent run.
+    const taskId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const workerBase = ((env as any).UPSTASH_WORKFLOW_URL ?? (env as any).WORKER_URL ?? "").replace(/\/$/, "");
 
-    let reply: string;
     try {
-        reply = await runAgent(env, sessionId, fullMessage, undefined, async (event) => {
-            if (event.type === "tool-start") {
-                await updateProgressMessage(event.data.name, "start");
-            } else if (event.type === "tool-result" || event.type === "tool-error") {
-                await updateProgressMessage(event.data.name, event.type === "tool-error" ? "error" : "done");
+        const { Client: QStashClient } = await import("@upstash/qstash");
+        const qstash = new QStashClient({
+            token: env.QSTASH_TOKEN,
+            baseUrl: env.QSTASH_URL,
+        });
 
-                if (event.type === "tool-result" && event.data.name === "generate_image") {
-                    const output = event.data.output as Record<string, unknown>;
-                    if (output?.success && typeof output?.imageUrl === "string" && output.imageUrl.startsWith("http")) {
-                        generatedImages.push({
-                            url: output.imageUrl as string,
-                            description: (output.description as string) || "Generated image",
-                            mimeType: (output.mimeType as string) || "image/png",
-                        });
-                    }
-                }
-            }
-        }, undefined, tgAttachments);
-    } catch (err) {
+        await qstash.publishJSON({
+            url: `${workerBase}/workflow`,
+            body: {
+                taskId,
+                sessionId,           // tg-{chatId}-{timestamp}  — already set above
+                taskType: "sub_agent",
+                instructions: fullMessage,
+                agentConfig: {
+                    name: `tg-agent-${chatId}`,
+                    allowedTools: null,    // full tool access
+                    memoryPrefix: `tg-${chatId}`,
+                    notifyEmail: null,
+                    spawnedAt: new Date().toISOString(),
+                    parentAgent: "telegram-webhook",
+                    parentSessionId: sessionId,
+                    userId: config.userId ?? null,  // critical — completion-callback uses this to push back
+                },
+            },
+        });
+
+        // Optional: typing indicator while workflow runs
+        await bot.sendChatAction(chatId, "typing").catch(() => { });
+
+        // fireCompletionCallback() in workflow.ts wf-finalize will push the result
+        // back to Telegram via proactive_notify when the workflow completes.
+
+    } catch (dispatchErr) {
+        console.error("[Telegram] Workflow dispatch failed:", String(dispatchErr));
         if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
-        await bot.sendMessage(chatId,
-            buildErrorMessage(String(err)),
-            { parse_mode: "HTML" }
-        );
+        // Fallback: send error to user so they're not left hanging
+        await bot.sendMessage(chatId, "⚠️ I had trouble starting that. Please try again.").catch(() => { });
         return;
     }
 
     if (progressMsg) await bot.deleteMessage(chatId, progressMsg.message_id);
-
-    // ── Capture generated image URLs from text ───────────────────────────────────
-    const imageRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:png|jpg|jpeg|gif|webp)/gi;
-    let imgMatch;
-    while ((imgMatch = imageRegex.exec(reply)) !== null) {
-        const url = imgMatch[0];
-        if (!generatedImages.find(i => i.url === url)) {
-            generatedImages.push({ url, description: "Generated Image", mimeType: url.endsWith(".png") ? "image/png" : "image/jpeg" });
-        }
-    }
-
-    // Strip image URLs from text body so they don't show as raw links
-    if (generatedImages.length > 0) {
-        const imageUrls = new Set(generatedImages.map(i => i.url));
-        reply = reply
-            .split("\n")
-            .filter(line => {
-                const t = line.trim();
-                if (!t) return true;
-                if (imageUrls.has(t)) return false;
-                const mdImg = /!\[([^\]]*)\]\(([^)]+)\)/.exec(t);
-                if (mdImg && imageUrls.has(mdImg[2].trim())) return false;
-                return true;
-            })
-            .join("\n")
-            .replace(/\n{3,}/g, "\n\n")
-            .trim();
-    }
-
-    // ── Detect audio URLs ─────────────────────────────────────────────────────────
-    const audioUrls: string[] = [];
-    const audioRegex = /https?:\/\/[^\s)<>"]+\/files\/[^\s)<>"]+\.(?:wav|mp3|ogg)/gi;
-    let audioMatch;
-    while ((audioMatch = audioRegex.exec(reply)) !== null) {
-        audioUrls.push(audioMatch[0]);
-    }
-
-    if (audioUrls.length > 0) {
-        for (const url of audioUrls) {
-            const mdRegex = new RegExp(`!\\[[^\\]]*\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`, "gi");
-            reply = reply.replace(mdRegex, "");
-            reply = reply.replace(url, "");
-        }
-        reply = reply.replace(/\n{3,}/g, "\n\n").trim();
-    }
-
-    // ── Split and send text reply ─────────────────────────────────────────────────
-    const voiceEnabled = await redis.get(`tg:voice:${chatId}`) as string | null;
-    const replyChunks = splitMessageSafe(reply, 3800);
-
-    const sendSafeMessage = async (rawText: string, htmlText: string, msgId: number) => {
-        try {
-            return await bot.sendMessage(chatId, htmlText, {
-                parse_mode: "HTML",
-                reply_to_message_id: msgId,
-                disable_web_page_preview: true,
-            });
-        } catch (e) {
-            console.warn("[Telegram] HTML parse failed, falling back to plain text:", String(e));
-            return await bot.sendMessage(chatId, rawText, {
-                reply_to_message_id: msgId,
-                disable_web_page_preview: true,
-            });
-        }
-    };
-
-    for (let i = 0; i < replyChunks.length; i++) {
-        const chunk = replyChunks[i];
-        if (!chunk.trim() && i === 0 && replyChunks.length === 1 && audioUrls.length > 0) continue;
-
-        const formatted = markdownToHtml(chunk);
-
-        if (i === 0 && replyChunks.length === 1 && voiceEnabled && reply.length <= 2000) {
-            try {
-                await bot.sendChatAction(chatId, "upload_document");
-                const { generateSpeechBytes } = await import("./tools/voice");
-                const audioBytes = await generateSpeechBytes(reply, env);
-
-                await sendSafeMessage(chunk, formatted, msg.message_id);
-                if (audioBytes) {
-                    await bot.sendVoice(chatId, audioBytes, {
-                        reply_to_message_id: msg.message_id,
-                        caption: buildVoiceCaption(),
-                    });
-                }
-            } catch (ttsErr) {
-                console.error("[Telegram TTS] Failed:", ttsErr);
-                await sendSafeMessage(chunk, formatted, msg.message_id);
-            }
-        } else {
-            await sendSafeMessage(chunk, formatted, msg.message_id);
-        }
-    }
-
-    // ── Send audio attachments (R2 direct read — no HTTP self-call) ──────────────
-    if (audioUrls.length > 0) {
-        await Promise.all(audioUrls.map(async (audioUrl) => {
-            try {
-                await bot.sendChatAction(chatId, "upload_document");
-                // Extract R2 key from URL (everything after /files/)
-                const r2KeyMatch = audioUrl.match(/\/files\/(.+)$/);
-                const r2Key = r2KeyMatch?.[1] ? decodeURIComponent(r2KeyMatch[1]) : null;
-                let audioBytes: Uint8Array | null = null;
-
-                // Direct R2 read — no HTTP roundtrip
-                if (r2Key && (env as any).FILES_BUCKET) {
-                    const obj = await (env as any).FILES_BUCKET.get(r2Key);
-                    if (obj) {
-                        audioBytes = new Uint8Array(await obj.arrayBuffer());
-                    } else {
-                        console.warn(`[Telegram Audio] Not found in R2: ${r2Key}`);
-                    }
-                } else {
-                    // Fallback: HTTP fetch if R2 key extraction fails
-                    const audioRes = await fetch(audioUrl);
-                    if (audioRes.ok) {
-                        audioBytes = new Uint8Array(await audioRes.arrayBuffer());
-                    }
-                }
-
-                if (!audioBytes) return;
-                await bot.sendVoice(chatId, audioBytes, {
-                    reply_to_message_id: msg.message_id,
-                    caption: buildVoiceCaption(),
-                });
-            } catch (aErr) {
-                console.error("[Telegram Audio] Failed to send voice bytes:", aErr);
-            }
-        }));
-    }
-
-    // ── Send generated images (R2 direct read — no HTTP self-call) ───────────────
-    if (generatedImages.length > 0) {
-        await Promise.all(generatedImages.map(async (img) => {
-            try {
-                await bot.sendChatAction(chatId, "upload_photo");
-                // Extract R2 key from URL (everything after /files/)
-                const r2KeyMatch = img.url.match(/\/files\/(.+)$/);
-                const r2Key = r2KeyMatch?.[1] ? decodeURIComponent(r2KeyMatch[1]) : null;
-                let imageBytes: Uint8Array | null = null;
-
-                // Direct R2 read — no HTTP roundtrip
-                if (r2Key && (env as any).FILES_BUCKET) {
-                    const obj = await (env as any).FILES_BUCKET.get(r2Key);
-                    if (obj) {
-                        imageBytes = new Uint8Array(await obj.arrayBuffer());
-                    } else {
-                        console.warn(`[Telegram Image] Not found in R2: ${r2Key}`);
-                    }
-                } else {
-                    // Fallback: HTTP fetch
-                    const imgRes = await fetch(img.url);
-                    if (imgRes.ok) imageBytes = new Uint8Array(await imgRes.arrayBuffer());
-                }
-
-                if (!imageBytes) return;
-                const caption = buildImageCaption(img.description, img.mimeType);
-                await bot.sendPhoto(chatId, imageBytes, caption);
-            } catch (imgErr) {
-                console.error("[Telegram Image] Failed to send photo:", imgErr);
-            }
-        }));
-    }
 
     // ── Log activity ──────────────────────────────────────────────────────────────
     const activityKey = config.userId ? `tg:activity:${config.userId}` : "tg:activity";
@@ -1226,7 +1076,7 @@ async function processMessage(
             username: msg.from?.username ?? `user_${msg.from?.id}`,
             firstName: msg.from?.first_name,
             messagePreview: fullMessage.slice(0, 100),
-            replyPreview: reply.slice(0, 100),
+            replyPreview: "Workflow dispatched",
             wasVoice: transcribedVoice,
             detectedLang,
             ts: Date.now(),

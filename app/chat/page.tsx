@@ -975,7 +975,7 @@ function ChatPageContent() {
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
-          <div className="size-2 rounded-full bg-primary animate-pulse" />
+          <img src="/logo.png" alt="VEGA" className="size-4 rounded-md object-contain" />
           <span className="text-xs font-semibold text-foreground tracking-wider">VEGA</span>
           <span className="text-[10px] text-muted-foreground">ID: {sessionId.slice(-8).toUpperCase()}</span>
         </div>
@@ -997,7 +997,7 @@ function ChatPageContent() {
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
           >
-            <div className="text-4xl sm:text-5xl drop-shadow-[0_0_15px_rgba(0,229,204,0.3)]">⚡</div>
+            <img src="/logo.png" alt="VEGA" className="size-16 sm:size-20 rounded-2xl shadow-[0_0_20px_rgba(0,229,204,0.4)]" />
             <p className="text-foreground font-bold tracking-widest text-base sm:text-lg">VEGA CORE ACTIVE</p>
             <p className="text-muted-foreground text-[11px] sm:text-xs max-w-sm leading-relaxed px-4">
               Autonomous AI agent with web search, memory, code execution, workflows, and more.

@@ -568,6 +568,20 @@ async function agenticLoop(
 
       console.log(`[Agent step ${step}] All ${toolResults.length} tools completed`);
 
+      // Short-circuit async media in web chat too
+      const asyncMediaResult = toolResults.find(
+        (r) =>
+          (r.name === "generate_image" || r.name === "text_to_speech") &&
+          (r.result as Record<string, unknown>)?.status === "pending"
+      );
+      if (asyncMediaResult) {
+        const isImage = asyncMediaResult.name === "generate_image";
+        const label = isImage ? "🎨 Image" : "🔊 Audio";
+        const taskId = String((asyncMediaResult.result as Record<string, unknown>)?.taskId ?? "?");
+        console.log(`[Agent] Async media queued (${asyncMediaResult.name}) → short-circuiting loop`);
+        return `${label} generation queued! It takes 20-90 seconds. You'll be notified here when it's ready.\n\nTask ID: \`${taskId}\``;
+      }
+
       // Append function responses (protobuf Struct: MUST be plain objects)
       const responseParts: RawPart[] = toolResults.map((r) => ({
         functionResponse: {

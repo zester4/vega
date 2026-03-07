@@ -328,6 +328,27 @@ async function handleSubAgent(
         })
       );
 
+      // ── ASYNC MEDIA SHORT-CIRCUIT ─────────────────────────────────────────────
+      // If generate_image or text_to_speech queued to /run-media, stop here.
+      // The /run-media handler will fire completion-callback when done.
+      // Do NOT let Gemini burn iterations on get_task_status / wait_for_agents.
+      const asyncMedia = toolResults.find(
+        (r) =>
+          (r.name === "generate_image" || r.name === "text_to_speech") &&
+          (r.result as Record<string, unknown>)?.status === "pending"
+      );
+      if (asyncMedia) {
+        const isImage = asyncMedia.name === "generate_image";
+        const label = isImage ? "🎨 Image" : "🔊 Audio";
+        const mediaTaskId = String((asyncMedia.result as Record<string, unknown>)?.taskId ?? "?");
+        const confirmMsg = `${label} generation queued! (~20-90s) — you'll be notified automatically. Task: \`${mediaTaskId}\``;
+        state.done = true;
+        state.finalText = confirmMsg;
+        state.iteration = i;
+        await redis.set(stateKey, JSON.stringify(state), { ex: STATE_TTL_SEC });
+        return { done: true, text: confirmMsg, toolsCalled: [asyncMedia.name] };
+      }
+
       // Append function responses (protobuf Struct: MUST be plain objects)
       const responseParts = toolResults.map((r) => ({
         functionResponse: {
