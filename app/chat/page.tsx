@@ -1171,7 +1171,7 @@ function ChatPageContent() {
       </div>
 
       {/* ── Input area (Anchored to bottom) ────────────────────────────────── */}
-      <div className="shrink-0 sticky bottom-0 z-10 mt-auto bg-background/80 backdrop-blur-md pt-4 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe border-t border-border/50">
+      <div className="shrink-0 bg-background/80 backdrop-blur-md pt-4 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe border-t border-border/50">
         <div className="max-w-4xl mx-auto w-full">
           <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
             {/* Attachments preview */}

@@ -20,6 +20,7 @@ TWOCAPTCHA_API_KEY     = "581dddb6024053b4991636afb6596b0a"
 binding       = "DB"
 database_name = "vega-d1"
 database_id   = "b72e0170-75aa-42c1-8194-7f4588d3dee1"
+CF_ACCOUNT_ID = "59810af6d60bfb764d81542ccf3ae5bd"
 
 # ─── R2 File Storage ──────────────────────────────────────────────────────────
 # Used by: agent file output, cf_screenshot tool

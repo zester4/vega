@@ -1089,10 +1089,8 @@ app.post("/workflow", async (c) => {
       WORKER_URL: c.env.WORKER_URL,
       TELEGRAM_INTERNAL_SECRET: c.env.TELEGRAM_INTERNAL_SECRET ?? "",
       BRIDGE_URL: (env.BRIDGE_URL ?? ""),
-      // Vector memory (optional)
       UPSTASH_VECTOR_REST_URL: (env.UPSTASH_VECTOR_REST_URL ?? ""),
       UPSTASH_VECTOR_REST_TOKEN: (env.UPSTASH_VECTOR_REST_TOKEN ?? ""),
-      // Optional integrations — empty string when not configured
       SERPER_API_KEY: (env.SERPER_API_KEY ?? ""),
       FIRECRAWL_API_KEY: (env.FIRECRAWL_API_KEY ?? ""),
       E2B_API_KEY: (env.E2B_API_KEY ?? ""),
@@ -1105,6 +1103,12 @@ app.post("/workflow", async (c) => {
       BROWSERLESS_TOKEN: (env.BROWSERLESS_TOKEN ?? ""),
       WHATSAPP_APP_SECRET: (env.WHATSAPP_APP_SECRET ?? ""),
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: (env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? ""),
+      CAPSOLVER_API_KEY: (env.CAPSOLVER_API_KEY ?? ""),
+      TWOCAPTCHA_API_KEY: (env.TWOCAPTCHA_API_KEY ?? ""),
+      VAULT_ENCRYPTION_SECRET: (env.VAULT_ENCRYPTION_SECRET ?? ""),
+      CF_API_TOKEN: (env.CF_API_TOKEN ?? ""),
+      CF_ACCOUNT_ID: (env.CF_ACCOUNT_ID ?? ""),
+      CF_EMAIL_SENDER: (env.CF_EMAIL_SENDER ?? ""),
     },
   });
 
