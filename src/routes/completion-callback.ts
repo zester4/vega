@@ -126,22 +126,21 @@ export async function handleCompletionCallback(
     }
 
     // ── 3. Inject into parent session history so VEGA "sees" it ────────────────
+    // KEY FIX: history key is agent:history:{sessionId}, not session:history:{sessionId}
     if (parentSessionId) {
         try {
-            const historyKey = `agent:history:${parentSessionId}`;
-            const injectedMessage = {
-                role: "user",
+            const { appendHistory } = await import("../memory");
+            await appendHistory(redis, parentSessionId, [{
+                role: "user" as const,
                 parts: [{
-                    text:
-                        `[Background agent '${agentName}' (task: ${taskId}) completed.\n` +
-                        `Status: ${status} | At: ${completedAt}\n\n` +
+                    text: `[SYSTEM: Background agent '${agentName}' (task: ${taskId}) has completed.\n` +
+                        `Status: ${status}\n` +
+                        `Completed at: ${completedAt}\n\n` +
                         `Result:\n${result.slice(0, 3000)}` +
-                        (result.length > 3000
-                            ? `\n\n[Output truncated. Full result: read_agent_memory('${memoryPrefix}', 'result')]`
-                            : ""),
+                        (result.length > 3000 ? "\n\n[Result truncated — full output in shared memory]" : "")
                 }],
-            };
-            await redis.rpush(historyKey, JSON.stringify(injectedMessage)).catch(() => { });
+            }]);
+            console.log(`[CompletionCallback] Injected result into session history: ${parentSessionId}`);
         } catch (e) {
             console.warn(`[CompletionCallback] History injection failed: ${String(e)}`);
         }

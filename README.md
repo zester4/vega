@@ -1,13 +1,13 @@
-# VEGA — Autonomous AI Agent
+# VEGA — Autonomous AI Agent (Unlimited Runtime Edition)
 
-Production-ready AI agent: **Next.js** (Vercel) for the app and auth, **Cloudflare Worker** for the agent, with **Neon** (Postgres), **D1** (Telegram configs), **Redis**, and **QStash**.
+Production-ready AI agent with **unlimited runtime** and **full memory continuity**. Built with **Next.js** (Vercel) and **Cloudflare Workers**, powered by **Gemini**, with **Neon** (Postgres), **D1**, **Redis**, and **QStash**.
 
 ---
 
 ## Architecture
 
-- **Next.js (Vercel)** — App UI, auth (Better Auth + Drizzle + Neon), `/api/*` proxies to Worker. Chat and settings are session-aware; chat history is **persistent per user** when logged in.
-- **Cloudflare Worker** — Agent brain (Gemini), tools, workflows, Telegram webhook, and inbound email. Uses Redis (sessions/history), D1 (configs, vault, audit), R2 (files, screenshots), and QStash (cron + workflows).
+- **Next.js (Vercel)** — App UI, auth (Better Auth + Drizzle + Neon), `/api/*` proxies to Worker. Chat and settings are session-aware; chat history is **persistent per user** across all platforms.
+- **Cloudflare Worker** — Agent brain (Gemini), tools, workflows, Telegram webhook, and inbound email. Uses Redis (sessions/history), D1 (configs, vault, audit), R2 (files, screenshots), and QStash (cron + durable workflows).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -44,7 +44,7 @@ Production-ready AI agent: **Next.js** (Vercel) for the app and auth, **Cloudfla
 ├── src/                    # Cloudflare Worker
 │   ├── index.ts            # Hono routes
 │   ├── agent.ts, gemini.ts, memory.ts
-│   ├── telegram.ts
+│   ├── telegram.ts, long-running.ts
 │   ├── db/schema.ts        # D1 table names + DDL (telegram_configs)
 │   ├── db/queries.ts       # D1 queries
 │   └── tools/, routes/
@@ -54,6 +54,16 @@ Production-ready AI agent: **Next.js** (Vercel) for the app and auth, **Cloudfla
 ├── drizzle.config.ts
 └── package.json
 ```
+
+---
+
+## Key Features (v2.0 Upgrade)
+
+-   **Unlimited Runtime**: Workflow chaining allows agents to run for weeks by spawning continuation workflows before hitting iteration limits.
+-   **Full Memory Continuity**: Every Telegram reply and workflow result builds on previous context — the agent never forgets a conversation.
+-   **Human-in-the-Loop**: Agents can pause mid-task to ask the user a question on Telegram and resume instantly upon receiving a reply.
+-   **Parallel Swarms**: Spawn multiple sub-agents simultaneously to handle independent sub-tasks in parallel.
+-   **Self-Healing DLQ**: Automatic recovery and resumption of failed workflows from the Dead Letter Queue.
 
 ---
 
@@ -180,8 +190,10 @@ Everything works when:
 | `POST /task` | Queue long-running task. |
 | `GET /task/:id` | Task status. |
 | `POST /workflow` | Upstash Workflow (durable). |
+| `POST /workflow/notify` | Wake a paused workflow (human-in-the-loop). |
+| `POST /workflow/resume-dlq` | Scan and resume failed workflows. |
 | `POST /telegram/webhook` | Telegram webhook (resolve bot by secret from D1). |
-| `POST /cron/tick` | QStash cron heartbeat. |
+| `POST /cron/tick` | QStash cron heartbeat (includes DLQ auto-resume). |
 
 ---
 
@@ -193,6 +205,8 @@ Everything works when:
 | `schedule_cron` | Create QStash cron jobs. |
 | `trigger_workflow` | Launch durable workflows. |
 | `spawn_agent` | Spawn sub-agents (uses QStash; requires correct `QSTASH_URL`). |
+| `wait_for_user_input` | **New**: Pause agent, ask user a question, resume on reply. |
+| `parallel_agents` | **New**: Spawn N agents simultaneously for parallel work. |
 | `store_memory` / `recall_memory` | Redis key-value memory. |
 | `cf_browse_page` | Advanced headless browser with JS rendering. |
 | `set_secret` / `get_secret` | Secure per-user encrypted keys vault. |

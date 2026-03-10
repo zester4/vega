@@ -59,6 +59,7 @@ import {
 import { handleCompletionCallback } from "./routes/completion-callback";
 import triggersRouter, { evaluateAllTriggers } from "./routes/triggers";
 import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "./routes/triggers";
+import workflowEventsRoute from "./routes/workflow-events";
 
 // ─── NEW IMPORTS FOR 5 FEATURES ───────────────────────────────────────────────
 import vaultRoutes from "./routes/vault";
@@ -1288,43 +1289,96 @@ app.post("/cron/tick", async (c) => {
           if (agent.status !== "running") continue;
 
           const age = now - new Date(agent.spawnedAt).getTime();
-          if (age < STUCK_THRESHOLD_MS) continue;
+
+          // ── Respect per-agent sleep interval ────────────────────────────────
+          // Monitor workflows sleep between checks — don't declare them stuck
+          // just because they've been "running" longer than 15 minutes.
+          // A monitor sleeping hourly needs 90-minute threshold (1.5× sleep).
+          const sleepSec = agent.agentConfig?.sleepBetweenStepsSec ?? 0;
+          const stuckThresholdMs = sleepSec > 0
+            ? Math.max(sleepSec * 1.5 * 1000, 15 * 60 * 1000)   // 1.5× sleep interval, min 15m
+            : 30 * 60 * 1000;                                     // 30m for non-sleeping agents
+
+          if (age < stuckThresholdMs) continue;
 
           // Double-check the task record in Redis
           const task = await getTask(redis, agent.agentId);
           if (!task || task.status !== "running") continue;
 
-          // It's genuinely stuck — mark as error
-          const errorMsg = `Agent timed out after ${Math.round(age / 60000)} minutes with no completion signal.`;
-          await updateTask(redis, agent.agentId, {
-            status: "error",
-            result: {
-              error: errorMsg,
-              failedAt: new Date().toISOString(),
-              selfHealed: true,
-            },
-          });
+          // Check if we already tried to respawn this run (avoid infinite respawn loops)
+          const respawnKey = `agent:respawned:${agent.agentId}`;
+          const alreadyRespawned = await redis.get(respawnKey).catch(() => null);
 
-          // Update spawned list
-          agent.status = "error";
-          agent.error = errorMsg;
-          agent.healedAt = new Date().toISOString();
-          await redis.lset("agent:spawned", i, JSON.stringify(agent));
+          if (!alreadyRespawned) {
+            // ── RESPAWN: re-publish workflow payload to QStash ─────────────────
+            // The workflow will pick up its state from Redis (stateKey = agent:wf-state:{taskId})
+            // which is still there with 7-day TTL. It resumes from the last saved iteration.
+            try {
+              const { Client: QStashClient } = await import("@upstash/qstash");
+              const qstash = new QStashClient({ token: c.env.QSTASH_TOKEN });
+              const workerBase = (c.env.UPSTASH_WORKFLOW_URL ?? c.env.WORKER_URL ?? "").replace(/\/$/, "");
 
-          healingReport.push(`Marked stuck agent '${agent.agentName}' (${agent.agentId}) as error after ${Math.round(age / 60000)}m`);
+              await qstash.publishJSON({
+                url: `${workerBase}/workflow`,
+                body: {
+                  taskId: agent.agentId,
+                  sessionId: agent.agentConfig?.parentSessionId ?? agent.agentId,
+                  taskType: "sub_agent",
+                  instructions: agent.agentConfig?.instructions ?? "Resume previous task.",
+                  agentConfig: {
+                    ...(agent.agentConfig ?? {}),
+                    name: agent.agentName,
+                    chainGeneration: (agent.agentConfig?.chainGeneration ?? 0) + 1,
+                  },
+                },
+              });
 
-          // Notify user via completion callback (sends Telegram + pending message)
-          if (agent.parentSessionId) {
-            const { fireCompletionCallback } = await import("./routes/workflow");
-            await fireCompletionCallback(c.env, {
-              taskId: agent.agentId,
-              agentName: agent.agentName,
-              parentSessionId: agent.parentSessionId,
-              memoryPrefix: agent.agentConfig?.memoryPrefix ?? agent.agentId,
+              // Mark as respawned so we don't loop on the next tick
+              await redis.set(respawnKey, "1", { ex: 60 * 60 * 2 }).catch(() => { }); // 2h TTL
+
+              // Update spawned list entry
+              agent.status = "respawned";
+              agent.respawnedAt = new Date().toISOString();
+              await redis.lset("agent:spawned", i, JSON.stringify(agent));
+
+              healingReport.push(`Respawned stuck agent '${agent.agentName}' (${agent.agentId}) after ${Math.round(age / 60000)}m`);
+              console.log(`[cron/tick] Respawned ${agent.agentId} — age: ${Math.round(age / 60000)}m, threshold: ${Math.round(stuckThresholdMs / 60000)}m`);
+            } catch (respawnErr) {
+              console.warn(`[cron/tick] Respawn failed for ${agent.agentId}:`, String(respawnErr));
+              // Fall through to mark as error if respawn itself fails
+              await updateTask(redis, agent.agentId, {
+                status: "error",
+                result: { error: `Respawn failed: ${String(respawnErr)}`, failedAt: new Date().toISOString() },
+              }).catch(() => { });
+              agent.status = "error";
+              await redis.lset("agent:spawned", i, JSON.stringify(agent));
+              healingReport.push(`Respawn failed for '${agent.agentName}' (${agent.agentId}) — marked error`);
+            }
+          } else {
+            // Already tried once — mark as truly dead and notify user
+            const errorMsg = `Agent '${agent.agentName}' ran for ${Math.round(age / 60000)} minutes and could not be auto-recovered.`;
+            await updateTask(redis, agent.agentId, {
               status: "error",
-              result: `Agent '${agent.agentName}' timed out. It ran for ${Math.round(age / 60000)} minutes without completing. You can try spawning it again.`,
-              completedAt: new Date().toISOString(),
-            }).catch((e) => console.warn("[cron/healing notify failed]", String(e)));
+              result: { error: errorMsg, failedAt: new Date().toISOString(), selfHealed: true },
+            }).catch(() => { });
+            agent.status = "error";
+            agent.error = errorMsg;
+            agent.healedAt = new Date().toISOString();
+            await redis.lset("agent:spawned", i, JSON.stringify(agent));
+            healingReport.push(`Permanently failed: '${agent.agentName}' (${agent.agentId})`);
+
+            if (agent.parentSessionId) {
+              const { fireCompletionCallback } = await import("./routes/workflow");
+              await fireCompletionCallback(c.env, {
+                taskId: agent.agentId,
+                agentName: agent.agentName,
+                parentSessionId: agent.parentSessionId,
+                memoryPrefix: agent.agentConfig?.memoryPrefix ?? agent.agentId,
+                status: "error",
+                result: `⚠️ ${errorMsg} You can try spawning it again.`,
+                completedAt: new Date().toISOString(),
+              }).catch(() => { });
+            }
           }
         } catch (agentErr) {
           console.warn("[cron/tick] Agent healing check failed:", String(agentErr));
@@ -1363,6 +1417,54 @@ Max 80 words. Be specific and actionable.`,
       iso: new Date().toISOString(),
     }), { ex: 60 * 60 * 25 }); // 25 hours TTL
 
+    // ── Proactive Heartbeat — daily Telegram briefing ──────────────────────────
+    // Sent once per day between 7–9 AM UTC. Each user gets one message per day max.
+    // The message surfaces the reflection so VEGA feels alive and self-aware.
+    try {
+      const nowHour = new Date().getUTCHours();
+      // Only send in the morning window (adjust to your timezone as needed)
+      if (nowHour >= 7 && nowHour <= 9) {
+        const usersResult = await c.env.DB.prepare(
+          "SELECT user_id, token FROM telegram_configs LIMIT 100"
+        ).all<{ user_id: string; token: string }>();
+
+        for (const user of usersResult.results ?? []) {
+          const todayKey = `tg:heartbeat-sent:${user.user_id}:${new Date().toISOString().slice(0, 10)}`;
+          const alreadySent = await redis.get(todayKey).catch(() => null);
+          if (alreadySent) continue;
+
+          const chatId = await redis.get<string>(`telegram:chat-id:${user.user_id}`).catch(() => null);
+          if (!chatId || !user.token) continue;
+
+          const healthLine = healingReport.length > 0
+            ? `\n\n⚠️ *Actions taken:*\n${healingReport.map(r => `• ${r}`).join("\n")}`
+            : "\n\n✅ All systems healthy.";
+
+          const briefingText =
+            `🤖 *VEGA Daily Briefing*\n\n` +
+            `${reflection}` +
+            `${healthLine}\n\n` +
+            `_${new Date().toUTCString()}_`;
+
+          await fetch(`https://api.telegram.org/bot${user.token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: briefingText,
+              parse_mode: "Markdown",
+            }),
+          }).catch(() => { }); // non-fatal — user may have blocked the bot
+
+          // Mark sent for today — 25h TTL to handle clock drift
+          await redis.set(todayKey, "1", { ex: 60 * 60 * 25 }).catch(() => { });
+          console.log(`[cron/tick] Heartbeat sent to user ${user.user_id}`);
+        }
+      }
+    } catch (heartbeatErr) {
+      console.warn("[cron/tick] Proactive heartbeat failed:", String(heartbeatErr));
+    }
+
     // Self-evolving tool ecosystem
     try {
       await analyzeToolUsageAndEvolve(c.env);
@@ -1380,6 +1482,17 @@ Max 80 words. Be specific and actionable.`,
     } catch (triggerErr) {
       console.error("[cron/tick] Trigger evaluation failed:", String(triggerErr));
     }
+
+    // Auto-resume any failed workflow runs from the DLQ
+    c.executionCtx.waitUntil(
+      fetch(`${c.env.WORKER_URL}/workflow/resume-dlq`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-internal-secret": c.env.TELEGRAM_INTERNAL_SECRET ?? "",
+        },
+      }).catch((e) => console.warn("[Cron] DLQ resume failed:", String(e)))
+    );
 
     return c.json({
       success: true,
@@ -1557,6 +1670,63 @@ app.route("/approvals", approvalsRoutes);
 app.route("/audit", auditRoutes);
 app.route("/cf-email", cfEmailRoutes);
 app.route("/triggers", triggersRouter);
+
+// Workflow event bus — notify waiting workflows, DLQ resume
+app.route("/workflow", workflowEventsRoute);
+
+app.post("/webhook/inbound/:webhookId", async (c) => {
+  const webhookId = c.req.param("webhookId");
+  const redis = getRedis(c.env);
+
+  // Look up the registration
+  const regRaw = await redis.get(`webhook:registry:${webhookId}`).catch(() => null);
+  if (!regRaw) {
+    return c.json({ error: "Webhook not registered or expired" }, 404);
+  }
+
+  let reg: { eventId: string; name: string; userId?: string; sessionId?: string; createdAt: string };
+  try {
+    reg = typeof regRaw === "string" ? JSON.parse(regRaw) : (regRaw as typeof reg);
+  } catch {
+    return c.json({ error: "Invalid webhook registration data" }, 500);
+  }
+
+  // Parse the inbound payload
+  let payload: unknown = {};
+  try { payload = await c.req.json(); } catch { /* body may be empty */ }
+
+  // Wake the waiting workflow
+  try {
+    const { Client: WorkflowClient } = await import("@upstash/workflow");
+    const client = new WorkflowClient({ token: c.env.QSTASH_TOKEN });
+
+    const result = await client.notify({
+      eventId: reg.eventId,
+      eventData: {
+        webhookId,
+        webhookName: reg.name,
+        receivedAt: new Date().toISOString(),
+        payload,
+        headers: Object.fromEntries(c.req.raw.headers.entries()),
+      },
+    });
+
+    const woken = (result as any)?.waiters?.length ?? 0;
+    console.log(`[Webhook Inbound] ${webhookId} (${reg.name}) — woke ${woken} workflows`);
+
+    // Log to Redis for debugging
+    await redis.set(
+      `webhook:last-call:${webhookId}`,
+      JSON.stringify({ receivedAt: new Date().toISOString(), woken, payloadPreview: JSON.stringify(payload).slice(0, 200) }),
+      { ex: 60 * 60 * 24 * 7 }
+    ).catch(() => { });
+
+    return c.json({ ok: true, webhookId, woken });
+  } catch (e) {
+    console.error(`[Webhook Inbound] notify failed for ${webhookId}:`, String(e));
+    return c.json({ error: String(e) }, 500);
+  }
+});
 
 // ─── Telegram Webhook: Handle Approval Callbacks ──────────────────────────────
 // This is integrated into the existing Telegram webhook handler below.

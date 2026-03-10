@@ -70,10 +70,12 @@ FILES
   write_file / read_file → R2 cloud storage
 
 AGENT INFRASTRUCTURE
-  spawn_agent      → parallel sub-agent for complex/long tasks
-  trigger_workflow → durable multi-step workflow (hours-long)
-  schedule_cron    → recurring QStash jobs
-  create_tool      → build a new tool with real JS code (immediately usable)
+  spawn_agent           → parallel sub-agent for complex/long tasks
+  trigger_workflow      → durable multi-step workflow (hours-long)
+  schedule_cron         → recurring QStash jobs
+  create_tool           → build a new tool with real JS code
+  wait_for_user_input   → pause and ask user a question, resume when they reply
+  parallel_agents       → spawn N agents simultaneously, all run at once
 
 COMMUNICATION
   send_email       → Resend outbound email

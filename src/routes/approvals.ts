@@ -366,6 +366,31 @@ export async function handleApprovalCallback(
     : `❌ Denied — VEGA will skip \`${record.tool_name}\`.`;
 
   await answerCallbackQuery(env, callbackQuery.id, record, responseText, db);
+
+  // ── Wake the workflow that is paused waiting for this approval ─────────────
+  // The approvalId IS the waitForEvent eventId (set by execHumanApprovalGate).
+  // Calling client.notify() here resumes context.waitForEvent() in workflow.ts.
+  // This is what actually unblocks the agent so it can proceed with or skip
+  // the sensitive tool call.
+  try {
+    const { Client: WorkflowClient } = await import("@upstash/workflow");
+    const client = new WorkflowClient({ token: (env as any).QSTASH_TOKEN });
+    await client.notify({
+      eventId: approvalId,
+      eventData: {
+        approved,
+        operation: record.tool_name,
+        toolArgs: record.tool_args,   // original args (JSON string)
+        decidedAt: new Date().toISOString(),
+      },
+    });
+    console.log(`[Approvals] Workflow notified — eventId: ${approvalId}, approved: ${approved}`);
+  } catch (notifyErr) {
+    // Non-fatal — D1 record is already updated. Agent polls check_approval_status
+    // on the next iteration as a fallback.
+    console.warn(`[Approvals] Workflow notify failed (agent will poll): ${String(notifyErr)}`);
+  }
+
   return true;
 }
 

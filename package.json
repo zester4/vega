@@ -1,6 +1,6 @@
 {
   "name": "vega",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -11,6 +11,7 @@
     "build": "npm run db:migrate && next build",
     "start": "next start",
     "lint": "eslint",
+    "qstash": "npx @upstash/qstash-cli dev",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push"

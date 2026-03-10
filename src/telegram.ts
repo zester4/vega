@@ -983,7 +983,59 @@ async function processMessage(
         } catch { /* non-fatal */ }
     }
 
-    // ── Dispatch to durable workflow ───────────────────────────────────────────
+    // ── Check for paused workflow waiting for this user's reply ────────────────
+    //
+    // If the previous agent called wait_for_user_input(), it stored:
+    // tg:awaiting-workflow:{chatId} = { eventId, sessionId, question }
+    //
+    // We detect this and notify the workflow instead of spawning a new one.
+    const pausedWorkflow = await redis.get(`tg:awaiting-workflow:${chatId}`) as string | null;
+
+    if (pausedWorkflow) {
+        try {
+            const { eventId } = JSON.parse(pausedWorkflow) as { eventId: string };
+
+            // Clear the waiting flag immediately (prevent double-fire)
+            await redis.del(`tg:awaiting-workflow:${chatId}`).catch(() => { });
+
+            const workerBase = (env.UPSTASH_WORKFLOW_URL ?? env.WORKER_URL ?? "").replace(/\/$/, "");
+
+            // Wake the suspended workflow with the user's reply
+            const notifyRes = await fetch(`${workerBase}/workflow/notify`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-internal-secret": env.TELEGRAM_INTERNAL_SECRET ?? "",
+                },
+                body: JSON.stringify({
+                    eventId,
+                    eventData: {
+                        text: fullMessage,
+                        chatId,
+                        from: msg.from,
+                        ts: Date.now(),
+                    },
+                }),
+            });
+
+            if (notifyRes.ok) {
+                await bot.sendMessage(chatId,
+                    `▶️ <b>Got it!</b> Continuing your task...`,
+                    { parse_mode: "HTML" }
+                ).catch(() => { });
+                console.log(`[Telegram] Resumed paused workflow via notify — eventId: ${eventId}`);
+                return; // ← Don't dispatch a new workflow
+            } else {
+                console.warn(`[Telegram] Workflow notify failed (${notifyRes.status}) — falling through to new workflow`);
+                // Fall through and dispatch a new workflow if notify failed
+            }
+        } catch (resumeErr) {
+            console.error("[Telegram] Error resuming paused workflow:", String(resumeErr));
+            // Fall through and dispatch a new workflow
+        }
+    }
+
+    // ── Dispatch to durable workflow (normal path) ────────────────────────────
     const taskId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const workerBase = (env.UPSTASH_WORKFLOW_URL ?? env.WORKER_URL ?? "").replace(/\/$/, "");
 
@@ -993,15 +1045,12 @@ async function processMessage(
             baseUrl: env.QSTASH_URL,
         });
 
-        // Cache delivery info in Redis so completion-callback can push the result back
-        // without needing D1. D1 bindings are unavailable in workflow context.env.
         const deliveryKey = `tg:delivery:${config.userId}`;
         await redis.set(deliveryKey, JSON.stringify({
             token: config.token,
             chatId: chatId,
         }), { ex: 60 * 60 * 24 * 30 }).catch(() => { });
 
-        // Build the full VEGA system prompt (includes live goals context)
         const { buildSystemPrompt } = await import("./agent");
         const built = await buildSystemPrompt(env, config.userId).catch(() => null);
 
@@ -1023,7 +1072,7 @@ async function processMessage(
                     userId: config.userId ?? null,
                     systemPrompt: built?.prompt ?? null,
                 },
-            } satisfies WorkflowPayload,
+            },
         });
 
         await bot.sendChatAction(chatId, "typing").catch(() => { });

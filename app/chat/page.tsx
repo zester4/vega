@@ -340,7 +340,7 @@ function UserMessageActions({ text }: { text: string }) {
   const { copied, copy } = useCopyToClipboard(text);
 
   return (
-    <MessageActions className="opacity-50 hover:opacity-100 transition-opacity">
+    <MessageActions className="opacity-100 sm:opacity-50 sm:hover:opacity-100 transition-opacity">
       <MessageAction tooltip="Edit message" onClick={() => console.log("Edit not implemented")}>
         <PencilIcon className="size-3.5" />
       </MessageAction>
@@ -356,7 +356,7 @@ function AssistantMessageActions({ text }: { text: string }) {
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
 
   return (
-    <MessageActions className="opacity-50 hover:opacity-100 transition-opacity mt-1">
+    <MessageActions className="opacity-100 sm:opacity-50 sm:hover:opacity-100 transition-opacity mt-1">
       <MessageAction tooltip="Copy text" onClick={copy}>
         {copied ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
       </MessageAction>
@@ -1018,7 +1018,7 @@ function ChatPageContent() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-background font-mono">
+    <div className="flex flex-col h-[100dvh] w-full overflow-hidden bg-background font-mono">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
@@ -1187,7 +1187,7 @@ function ChatPageContent() {
                 placeholder="Message VEGA..."
                 disabled={isLoading}
                 rows={1}
-                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-20 sm:pr-24 text-[13px] sm:text-sm text-foreground placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
+                className="w-full resize-none bg-transparent px-3 py-3 sm:px-4 sm:py-4 pr-20 sm:pr-24 text-base sm:text-sm text-foreground placeholder-[#6b6b7a] focus:outline-none disabled:opacity-50 min-h-[48px] sm:min-h-[52px] max-h-[150px] sm:max-h-[200px] font-sans"
               />
               <div className="absolute right-1.5 bottom-1.5 sm:right-2 sm:bottom-2 flex items-center gap-1.5">
                 <button

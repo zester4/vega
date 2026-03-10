@@ -93,6 +93,7 @@ import { insertAuditLog, type AuditEntry } from "../routes/audit";
 import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "../routes/triggers";
 import { PROFILE_TOOL_DECLARATIONS, executeProfileTool } from "../routes/profile";
 import { CAPTCHA_TOOL_DECLARATIONS, executeCaptchaTool } from "./captcha";
+import { LONG_RUNNING_DECLARATIONS, executeLongRunningTool } from "../long-running";
 
 // ─── Tool Usage Batching ──────────────────────────────────────────────────────
 // In-process tool usage accumulator
@@ -972,6 +973,8 @@ export const BUILTIN_DECLARATIONS = [
   // ── CAPTCHA BYPASS ENGINE ──────────────────────────────────────────────────
   ...CAPTCHA_TOOL_DECLARATIONS,
 
+  ...LONG_RUNNING_DECLARATIONS,
+
   {
     name: "check_approval_status",
     description: "Check the current status of a human approval request. Use this to poll if a previously-blocked tool (like set_secret or trigger_workflow) has been approved or rejected by the user. Returns 'pending', 'approved', or 'rejected'.",
@@ -980,6 +983,20 @@ export const BUILTIN_DECLARATIONS = [
         approvalId: { type: "string", description: "The approval ID returned by the blocked tool call." },
       },
       required: ["approvalId"],
+    },
+  },
+
+  {
+    name: "register_webhook",
+    description: "Create a webhook URL that external services (GitHub, Stripe, Zapier, PagerDuty, etc.) can call to wake this workflow. Returns a unique URL. Use context.waitForEvent(webhookId) in your workflow to pause until the webhook fires. Perfect for: waiting for a payment to complete, a CI/CD pipeline to finish, or any async external event.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Human-readable name for this webhook (e.g. 'GitHub PR merged', 'Stripe payment')" },
+        description: { type: "string", description: "What event this webhook listens for" },
+        ttl_hours: { type: "number", description: "How long the webhook URL stays active (default 72 hours / 3 days)" },
+      },
+      required: ["name"],
     },
   },
 
@@ -1220,9 +1237,14 @@ async function executeToolInner(
       case "check_approval_status": return await execCheckApprovalStatus(args, env);
       case "discover_tools":
         return await execDiscoverTools(args, env, resolvedUserId);
+      case "register_webhook": return await execRegisterWebhook(args, env, callerSessionId);
 
+      default: {
+        const longRunningResult = await executeLongRunningTool(toolName, args, env, callerSessionId);
+        if (longRunningResult !== null) return longRunningResult;
 
-      default: return await execDynamicTool(toolName, args, env, resolvedUserId);
+        return await execDynamicTool(toolName, args, env, resolvedUserId);
+      }
     }
   } catch (e) {
     // NEVER propagate — always return a plain object
@@ -3059,13 +3081,13 @@ async function execUpdateCron(args: ToolArgs, env: Env): Promise<Record<string, 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function execHumanApprovalGate(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
-  const { operation, channel = "ui", metadata } = args as {
+  const { operation, channel = "telegram", metadata } = args as {
     operation: string;
     channel?: "ui" | "telegram" | "email" | "all";
     metadata?: Record<string, unknown>;
   };
 
-  // Need userId to scope the approval
+  // Need userId to scope the approval to the right user
   let userId: string | undefined;
   if (callerSessionId) {
     const { getRedis } = await import("../memory");
@@ -3077,7 +3099,7 @@ async function execHumanApprovalGate(args: ToolArgs, env: Env, callerSessionId?:
     return { error: "Approval request failed: No userId found in context (unauthenticated)." };
   }
 
-  // Use the robust approval path from src/routes/approvals.ts
+  // Create D1 record and send Telegram inline keyboard
   const approvalId = await requestApproval(env.DB, env, {
     userId,
     sessionId: callerSessionId ?? "unknown",
@@ -3085,12 +3107,23 @@ async function execHumanApprovalGate(args: ToolArgs, env: Env, callerSessionId?:
     toolArgs: { operation, ...metadata },
   });
 
+  // ── CRITICAL: return the _pause_workflow marker ────────────────────────────
+  // workflow.ts checks for _pause_workflow === true after each tool call.
+  // When it finds this, it calls context.waitForEvent(approvalId, { timeout: "5m" })
+  // and the Worker exits entirely — zero CPU held.
+  // When the user taps ✅/❌ on Telegram, handleApprovalCallback calls
+  // client.notify({ eventId: approvalId, eventData: { approved: true/false } })
+  // which wakes the workflow. The inject-reply step then tells Gemini the decision.
   return {
-    id: approvalId,
+    _pause_workflow: true,
+    _event_id: approvalId,
+    _question: `Awaiting human approval for: ${operation}`,
+    // These fields are for Gemini's context (it sees them before the step exits)
+    approvalId,
     operation,
     channel,
     status: "pending",
-    message: `Approval requested via ${channel}. Request ID: ${approvalId}. VEGA will pause until you decide.`,
+    message: `⏳ Approval request sent via Telegram. Waiting for your decision on: "${operation}". The workflow is paused — reply via the Telegram inline buttons.`,
   };
 }
 
@@ -3523,4 +3556,58 @@ async function execSendSMS(args: ToolArgs, env: Env): Promise<Record<string, unk
   } catch (e) {
     return { success: false, error: String(e) };
   }
+}
+
+async function execRegisterWebhook(args: ToolArgs, env: Env, callerSessionId?: string): Promise<Record<string, unknown>> {
+  const { name, description = "", ttl_hours = 72 } = args as {
+    name: string;
+    description?: string;
+    ttl_hours?: number;
+  };
+
+  const webhookId = crypto.randomUUID();
+  // The eventId IS the webhookId — the workflow calls waitForEvent(webhookId)
+  const eventId = webhookId;
+
+  const workerBase = (env.WORKER_URL ?? "").replace(/\/$/, "");
+  if (!workerBase) return { error: "WORKER_URL not configured." };
+
+  const webhookUrl = `${workerBase}/webhook/inbound/${webhookId}`;
+
+  // Store registration in Redis
+  const { getRedis } = await import("../memory");
+  const redis = getRedis(env);
+
+  let userId: string | undefined;
+  if (callerSessionId) {
+    userId = (await redis.get(`session:user-map:${callerSessionId}`)) as string | undefined;
+  }
+
+  const reg = {
+    eventId,
+    name,
+    description,
+    userId: userId ?? null,
+    sessionId: callerSessionId ?? null,
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + ttl_hours * 3600 * 1000).toISOString(),
+  };
+
+  await redis.set(
+    `webhook:registry:${webhookId}`,
+    JSON.stringify(reg),
+    { ex: Math.round(ttl_hours * 3600) }
+  );
+
+  console.log(`[register_webhook] Created ${webhookId} (${name}) — expires in ${ttl_hours}h`);
+
+  return {
+    webhookId,
+    webhookUrl,
+    eventId,        // pass this to context.waitForEvent() in your workflow
+    name,
+    ttl_hours,
+    expiresAt: reg.expiresAt,
+    instructions: `Give this URL to the external service: ${webhookUrl}. Then in your workflow call context.waitForEvent("${webhookId}") to pause until the service calls the URL. The payload sent to the URL will arrive as eventData.`,
+  };
 }

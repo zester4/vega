@@ -183,7 +183,7 @@ export const PromptInputProvider = ({
   >([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // oxlint-disable-next-line eslint(no-empty-function)
-  const openRef = useRef<() => void>(() => {});
+  const openRef = useRef<() => void>(() => { });
 
   const add = useCallback((files: File[] | FileList) => {
     const incoming = [...files];
@@ -565,13 +565,13 @@ export const PromptInput = ({
       usingProvider
         ? controller?.attachments.clear()
         : setItems((prev) => {
-            for (const file of prev) {
-              if (file.url) {
-                URL.revokeObjectURL(file.url);
-              }
+          for (const file of prev) {
+            if (file.url) {
+              URL.revokeObjectURL(file.url);
             }
-            return [];
-          }),
+          }
+          return [];
+        }),
     [usingProvider, controller]
   );
 
@@ -728,9 +728,9 @@ export const PromptInput = ({
       const text = usingProvider
         ? controller.textInput.value
         : (() => {
-            const formData = new FormData(form);
-            return (formData.get("message") as string) || "";
-          })();
+          const formData = new FormData(form);
+          return (formData.get("message") as string) || "";
+        })();
 
       // Reset form immediately after capturing text to avoid race condition
       // where user input during async blob conversion would be lost
@@ -922,19 +922,19 @@ export const PromptInputTextarea = ({
 
   const controlledProps = controller
     ? {
-        onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
-          controller.textInput.setInput(e.currentTarget.value);
-          onChange?.(e);
-        },
-        value: controller.textInput.value,
-      }
+      onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
+        controller.textInput.setInput(e.currentTarget.value);
+        onChange?.(e);
+      },
+      value: controller.textInput.value,
+    }
     : {
-        onChange,
-      };
+      onChange,
+    };
 
   return (
     <InputGroupTextarea
-      className={cn("field-sizing-content max-h-48 min-h-16", className)}
+      className={cn("field-sizing-content max-h-48 min-h-16 text-base sm:text-sm", className)}
       name="message"
       onCompositionEnd={handleCompositionEnd}
       onCompositionStart={handleCompositionStart}
@@ -994,10 +994,10 @@ export const PromptInputTools = ({
 export type PromptInputButtonTooltip =
   | string
   | {
-      content: ReactNode;
-      shortcut?: string;
-      side?: ComponentProps<typeof TooltipContent>["side"];
-    };
+    content: ReactNode;
+    shortcut?: string;
+    side?: ComponentProps<typeof TooltipContent>["side"];
+  };
 
 export type PromptInputButtonProps = ComponentProps<typeof InputGroupButton> & {
   tooltip?: PromptInputButtonTooltip;
