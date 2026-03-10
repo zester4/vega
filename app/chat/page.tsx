@@ -714,7 +714,7 @@ function ChatPageContent() {
           setMessages((prev) => {
             const newMessages = pushes.map((push: any) => {
               const isApproval = push.type === "approval_request";
-              
+
               const msg: ChatMessage = {
                 id: `push-${push.ts ?? Date.now()}-${nanoid(4)}`,
                 role: "assistant" as const,
@@ -1049,7 +1049,7 @@ function ChatPageContent() {
     <div className="flex flex-col h-full w-full overflow-hidden bg-background font-mono">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
+      <div className="hidden sm:flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
         <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => setIsOpen(true)}
@@ -1075,7 +1075,7 @@ function ChatPageContent() {
       </div>
 
       {/* ── Messages ───────────────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 sm:px-4 py-4 space-y-4 sm:space-y-6">
+      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 sm:px-4 py-4 space-y-4 sm:space-y-6 min-h-0">
 
         {messages.length === 0 && !isLoading && (
           <motion.div className="flex flex-col items-center justify-center h-full gap-3 sm:gap-4 text-center py-10 sm:py-20"
@@ -1170,9 +1170,9 @@ function ChatPageContent() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* ── Input area ─────────────────────────────────────────────────────── */}
-      <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent pt-4 sm:pt-6 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe">
-        <div className="max-w-4xl mx-auto">
+      {/* ── Input area (Anchored to bottom) ────────────────────────────────── */}
+      <div className="shrink-0 sticky bottom-0 z-10 mt-auto bg-background/80 backdrop-blur-md pt-4 pb-2 sm:pb-6 px-2 sm:px-4 pb-safe border-t border-border/50">
+        <div className="max-w-4xl mx-auto w-full">
           <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 sm:gap-2">
             {/* Attachments preview */}
             {attachments.length > 0 && (
