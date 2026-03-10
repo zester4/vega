@@ -928,6 +928,66 @@ export const BUILTIN_DECLARATIONS = [
     },
   },
 
+  {
+    name: "cloudflare_admin",
+    description:
+      "Full Cloudflare infrastructure control. Deploy Workers, manage KV namespaces, " +
+      "D1 databases, R2 buckets, DNS records, and tail live Worker logs. " +
+      "Use this to deploy code for users, create databases, manage DNS, or inspect live errors.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: [
+            "list_workers",
+            "deploy_worker",
+            "get_worker_code",
+            "tail_logs",
+            "list_kv_namespaces",
+            "create_kv_namespace",
+            "kv_get",
+            "kv_set",
+            "list_d1_databases",
+            "create_d1_database",
+            "query_d1",
+            "list_r2_buckets",
+            "create_r2_bucket",
+            "list_dns_records",
+            "create_dns_record",
+            "delete_dns_record",
+            "list_pages_projects",
+            "get_worker_analytics",
+          ],
+          description: "Action to perform",
+        },
+        // Worker actions
+        worker_name: { type: "string", description: "Worker script name" },
+        worker_code: { type: "string", description: "Worker TypeScript/JS source code" },
+        worker_bindings: { type: "object", description: "Worker bindings config (KV, D1, R2, etc.)" },
+        // KV actions
+        namespace_id: { type: "string", description: "KV namespace ID" },
+        namespace_title: { type: "string", description: "KV namespace title for create" },
+        kv_key: { type: "string", description: "Key to get/set in KV" },
+        kv_value: { type: "string", description: "Value to set in KV" },
+        // D1 actions
+        database_id: { type: "string", description: "D1 database ID" },
+        database_name: { type: "string", description: "D1 database name for create" },
+        sql: { type: "string", description: "SQL query to run against D1" },
+        // R2 actions
+        bucket_name: { type: "string", description: "R2 bucket name" },
+        // DNS actions
+        zone_id: { type: "string", description: "Cloudflare zone ID" },
+        dns_type: { type: "string", enum: ["A", "AAAA", "CNAME", "MX", "TXT", "NS"], description: "DNS record type" },
+        dns_name: { type: "string", description: "DNS record name (e.g. 'api.example.com')" },
+        dns_content: { type: "string", description: "DNS record value/content" },
+        dns_ttl: { type: "number", description: "TTL in seconds (1 = auto)" },
+        record_id: { type: "string", description: "DNS record ID for delete" },
+      },
+      required: ["action"],
+    },
+  },
+
 
   // ── INVOKE AGENT (Reuse a previously-spawned agent) ───────────────────────────
 
@@ -1009,7 +1069,7 @@ type ToolArgs = Record<string, unknown>;
 
 // ─── Main Dispatcher ──────────────────────────────────────────────────────────
 
-const REQUIRES_APPROVAL = ["set_secret", "trigger_workflow", "spawn_agent", "send_email", "send_sms", "delete_file", "delete_memory"];
+const REQUIRES_APPROVAL = ["trigger_workflow", "spawn_agent", "send_email", "send_sms", "delete_file", "delete_memory"];
 
 export async function executeTool(
   toolName: string,
@@ -1038,38 +1098,37 @@ export async function executeTool(
     if (toolNeedsApproval(toolName, args)) {
       if (!resolvedUserId) {
         return {
-          error: `Tool '${toolName}' requires human approval, but no user session found.`,
+          error: `Tool '${toolName}' requires human approval, but no user session was found. ` +
+            `Please use the human_approval_gate tool explicitly to request approval first.`,
           toolName,
+          requires_approval: true,
         };
       }
+
+      // Create the D1 record and send the Telegram inline keyboard
       const approvalId = await requestApproval(env.DB, env, {
         userId: resolvedUserId,
         sessionId: callerSessionId ?? "unknown",
         toolName,
         toolArgs: args,
       });
-      const decision = await waitForApproval(env.DB, approvalId, args);
-      if (!decision.approved) {
-        // Log the denial
-        // Truly fire-and-forget: schedule after current tick so it never blocks
-        Promise.resolve().then(() =>
-          insertAuditLog(env.DB, {
-            userId: resolvedUserId,
-            sessionId: callerSessionId ?? "unknown",
-            toolName,
-            args,
-            denied: true,
-            durationMs: Date.now() - startMs,
-          }).catch(() => { })
-        );
 
-        return {
-          error: `Tool '${toolName}' was denied by the user: ${decision.reason}`,
-          toolName,
-          denied: true,
-        };
-      }
-      args = decision.args ?? args;
+      // ── Return the _pause_workflow marker ─────────────────────────────────
+      // This bubbles up through the workflow iter step just like human_approval_gate.
+      // The workflow calls context.waitForEvent(approvalId) and the Worker exits.
+      // When the user taps ✅/❌, handleApprovalCallback calls client.notify()
+      // which wakes the workflow. The inject-reply step then tells Gemini the
+      // decision and the agent proceeds or skips on the next iteration.
+      return {
+        _pause_workflow: true,
+        _event_id: approvalId,
+        _question: `Awaiting approval for tool: ${toolName}`,
+        approvalId,
+        toolName,
+        status: "pending",
+        message: `⏳ Approval request sent to Telegram for \`${toolName}\`. ` +
+          `The workflow is paused. Tap ✅ or ❌ in the Telegram message to continue.`,
+      };
     }
 
     // ── Execute ───────────────────────────────────────────────────────────────
@@ -1196,6 +1255,11 @@ async function executeToolInner(
 
       // Web Scraping
       case "firecrawl": return await execFirecrawlTool(args, env);
+
+      case "cloudflare_admin": {
+        const { execCloudflareAdmin } = await import("./cloudflare-admin");
+        return execCloudflareAdmin(args, env);
+      }
 
       case "create_trigger":
       case "list_triggers":

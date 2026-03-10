@@ -32,6 +32,15 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { MessageResponse, MessageActions, MessageAction } from "@/components/ai-elements/message";
 import { useSidebar } from "@/components/layout/sidebar-context";
+import {
+  Confirmation,
+  ConfirmationAction,
+  ConfirmationActions,
+  ConfirmationRequest,
+  ConfirmationTitle,
+  ConfirmationAccepted,
+  ConfirmationRejected,
+} from "@/components/ai-elements/confirmation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -116,19 +125,25 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
           {tools.map((tool) => {
             const isOpen = expanded[tool.id] ?? (tool.status === "running");
 
-            // Detect human_approval_gate outputs
-            const approval =
-              tool.name === "human_approval_gate" &&
-                tool.output &&
-                typeof tool.output === "object"
-                ? (tool.output as {
-                  id?: string;
-                  operation?: string;
-                  status?: string;
-                  channel?: string;
-                  message?: string;
-                })
+            // Detect approval requirements (either human_approval_gate or generic tool with _pause_workflow)
+            const outputObj =
+              tool.output && typeof tool.output === "object"
+                ? (tool.output as any)
                 : null;
+
+            const isApprovalRequest =
+              tool.name === "human_approval_gate" ||
+              (outputObj && outputObj._pause_workflow && outputObj.approvalId);
+
+            const approval = isApprovalRequest
+              ? {
+                id: outputObj?.approvalId || outputObj?.id,
+                operation: outputObj?.operation || outputObj?.message || tool.name,
+                status: outputObj?.status || "pending",
+                channel: outputObj?.channel || "ui",
+                message: outputObj?.message || `Approval required for ${tool.name}`,
+              }
+              : null;
 
             return (
               <motion.div
@@ -183,109 +198,101 @@ function ToolStream({ tools }: { tools: ToolCall[] }) {
                         <div className="px-3 py-2 bg-background/50">
                           {/* Human approval special-case */}
                           {approval ? (
-                            <div className="space-y-2">
-                              <p className="text-[10px] font-semibold text-foreground uppercase">
+                            <Confirmation
+                              className="border-none bg-transparent p-0"
+                              state={
+                                approval.status === "pending"
+                                  ? "approval-requested"
+                                  : approval.status === "approved"
+                                    ? "approval-responded"
+                                    : "approval-responded" // ConfirmationAccepted/Rejected will filter
+                              }
+                              approval={{
+                                id: approval.id,
+                                approved:
+                                  approval.status === "approved"
+                                    ? true
+                                    : approval.status === "denied"
+                                      ? false
+                                      : undefined,
+                              }}
+                            >
+                              <ConfirmationTitle className="text-[10px] font-semibold text-foreground uppercase block mb-1">
                                 Human Approval Required
-                              </p>
+                              </ConfirmationTitle>
+
                               {approval.operation && (
-                                <p className="text-[10px] text-foreground/80 whitespace-pre-wrap">
+                                <p className="text-[10px] text-foreground/80 whitespace-pre-wrap mb-1">
                                   {approval.operation}
                                 </p>
                               )}
-                              <p className="text-[10px] text-muted-foreground">
-                                ID:{" "}
-                                <span className="font-mono">
-                                  {approval.id ?? "unknown"}
-                                </span>{" "}
-                                • Channel:{" "}
-                                <span className="uppercase">
-                                  {approval.channel ?? "ui"}
-                                </span>
+
+                              <p className="text-[10px] text-muted-foreground mb-1">
+                                ID: <span className="font-mono">{approval.id ?? "unknown"}</span> • Channel: <span className="uppercase">{approval.channel ?? "ui"}</span>
                               </p>
-                              <p className="text-[10px] text-[#4a4a58]">
-                                {approval.message ??
-                                  "Review this operation and approve or reject it. This decision will be recorded for the agent to read."}
-                              </p>
-                              {approval.status === "pending" && approval.id && (
-                                <div className="flex items-center gap-2 pt-1">
-                                  <button
+
+                              <ConfirmationRequest>
+                                <p className="text-[10px] text-[#4a4a58] mb-2">
+                                  {approval.message ?? "Review this operation and approve or reject it."}
+                                </p>
+                                <ConfirmationActions>
+                                  <ConfirmationAction
+                                    variant="outline"
                                     disabled={decidingApproval === approval.id}
                                     onClick={async () => {
                                       try {
                                         setDecidingApproval(approval.id!);
-                                        await fetch(
-                                          `/api/approvals/${approval.id}/decision`,
-                                          {
-                                            method: "POST",
-                                            headers: {
-                                              "Content-Type":
-                                                "application/json",
-                                            },
-                                            body: JSON.stringify({
-                                              approved: false,
-                                            }),
-                                          }
-                                        );
+                                        await fetch(`/api/approvals/${approval.id}/decision`, {
+                                          method: "POST",
+                                          headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ approved: false }),
+                                        });
                                       } catch (e) {
-                                        console.error(
-                                          "[Approval reject error]",
-                                          e
-                                        );
+                                        console.error("[Approval reject error]", e);
                                       } finally {
                                         setDecidingApproval(null);
                                       }
                                     }}
-                                    className="px-2 py-1 rounded-md border border-red-500/30 text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
+                                    className="h-7 px-2 border-red-500/30 text-red-400 hover:bg-red-500/10"
                                   >
-                                    {decidingApproval === approval.id
-                                      ? "Rejecting…"
-                                      : "Reject"}
-                                  </button>
-                                  <button
+                                    {decidingApproval === approval.id ? "Rejecting…" : "Reject"}
+                                  </ConfirmationAction>
+                                  <ConfirmationAction
+                                    variant="outline"
                                     disabled={decidingApproval === approval.id}
                                     onClick={async () => {
                                       try {
                                         setDecidingApproval(approval.id!);
-                                        await fetch(
-                                          `/api/approvals/${approval.id}/decision`,
-                                          {
-                                            method: "POST",
-                                            headers: {
-                                              "Content-Type":
-                                                "application/json",
-                                            },
-                                            body: JSON.stringify({
-                                              approved: true,
-                                            }),
-                                          }
-                                        );
+                                        await fetch(`/api/approvals/${approval.id}/decision`, {
+                                          method: "POST",
+                                          headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ approved: true }),
+                                        });
                                       } catch (e) {
-                                        console.error(
-                                          "[Approval approve error]",
-                                          e
-                                        );
+                                        console.error("[Approval approve error]", e);
                                       } finally {
                                         setDecidingApproval(null);
                                       }
                                     }}
-                                    className="px-2 py-1 rounded-md border border-emerald-500/30 text-[10px] text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                                    className="h-7 px-2 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
                                   >
-                                    {decidingApproval === approval.id
-                                      ? "Approving…"
-                                      : "Approve"}
-                                  </button>
-                                </div>
-                              )}
-                              {approval.status &&
-                                approval.status !== "pending" && (
-                                  <p className="text-[10px] text-[#8b8b9a]">
-                                    Status:{" "}
-                                    <span className="font-semibold uppercase">
-                                      {approval.status}
-                                    </span>
-                                  </p>
-                                )}
-                            </div>
+                                    {decidingApproval === approval.id ? "Approving…" : "Approve"}
+                                  </ConfirmationAction>
+                                </ConfirmationActions>
+                              </ConfirmationRequest>
+
+                              <ConfirmationAccepted>
+                                <p className="text-[10px] text-emerald-400 font-semibold uppercase">
+                                  ✅ Approved
+                                </p>
+                              </ConfirmationAccepted>
+
+                              <ConfirmationRejected>
+                                <p className="text-[10px] text-red-400 font-semibold uppercase">
+                                  ❌ Rejected
+                                </p>
+                              </ConfirmationRejected>
+                            </Confirmation>
                           ) : (
                             <>
                               <p
@@ -705,12 +712,33 @@ function ChatPageContent() {
         const pushes = data.pushes;
         if (pushes?.length && pushes.length > 0) {
           setMessages((prev) => {
-            const newMessages = pushes.map((push: any) => ({
-              id: `push-${push.ts ?? Date.now()}-${nanoid(4)}`,
-              role: "assistant" as const,
-              content: push.message,
-              timestamp: push.ts ?? Date.now(),
-            }));
+            const newMessages = pushes.map((push: any) => {
+              const isApproval = push.type === "approval_request";
+              
+              const msg: ChatMessage = {
+                id: `push-${push.ts ?? Date.now()}-${nanoid(4)}`,
+                role: "assistant" as const,
+                content: push.message || (isApproval ? "" : "Push notification received."),
+                timestamp: push.ts ?? Date.now(),
+              };
+
+              if (isApproval) {
+                msg.tools = [{
+                  id: nanoid(),
+                  name: push.toolName || "approval_gate",
+                  status: "running",
+                  input: push.toolArgs,
+                  output: {
+                    _pause_workflow: true,
+                    approvalId: push.approvalId,
+                    operation: push.operation,
+                    message: push.message || `Approval required for ${push.toolName}`,
+                    status: "pending"
+                  }
+                }];
+              }
+              return msg;
+            });
             const updated = [...prev, ...newMessages];
             setTimeout(() => persistMessages(updated), 0);
             return updated;
@@ -1011,14 +1039,14 @@ function ChatPageContent() {
 
   if (!isMounted || !sessionId) {
     return (
-      <div className="flex h-[100dvh] w-full items-center justify-center bg-background">
+      <div className="flex h-full w-full items-center justify-center bg-background text-foreground transition-colors duration-300">
         <div className="size-4 rounded-full bg-primary animate-ping" />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-[100dvh] w-full overflow-hidden bg-background font-mono">
+    <div className="flex flex-col h-full w-full overflow-hidden bg-background font-mono">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
@@ -1242,7 +1270,7 @@ function ChatPageContent() {
 export default function ChatPage() {
   return (
     <Suspense fallback={
-      <div className="flex h-[100dvh] w-full items-center justify-center bg-background">
+      <div className="flex h-full w-full items-center justify-center bg-background text-foreground transition-colors duration-300">
         <div className="size-4 rounded-full bg-primary animate-ping" />
       </div>
     }>

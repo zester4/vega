@@ -79,4 +79,8 @@ interface Env {
   CF_EMAIL_SENDER: {                 // CF native email send binding
     send(msg: unknown): Promise<void>;
   };
+
+  // ── NEW: Cloudflare Admin tool ───────────────────────────────────────────
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
 }

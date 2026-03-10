@@ -200,6 +200,23 @@ export async function requestApproval(
 
   await insertApproval(db, record);
 
+  // Push to the Next.js pending items queue so the web chat shows the buttons
+  try {
+    const { getRedis } = await import("../memory");
+    const redis = getRedis(env);
+    const sessionKey = `session:pending-push:user-${opts.userId}`;
+    await redis.lpush(sessionKey, JSON.stringify({
+      type: "approval_request",
+      approvalId: id,
+      toolName: opts.toolName,
+      toolArgs: safeArgs,
+      operation: String(safeArgs.operation ?? opts.toolName),
+      expiresAt: expiresAt.toISOString(),
+      ts: Date.now(),
+    }));
+    await redis.expire(sessionKey, 60 * 60 * 24);
+  } catch { /* non-fatal */ }
+
   // Notify via Telegram inline keyboard if user has a bot configured
   await sendTelegramApprovalMessage(env, opts.userId, id, opts.toolName, safeArgs)
     .catch((e) => console.warn("[Approvals] Telegram notify failed:", String(e)));
@@ -463,6 +480,55 @@ approvals.get("/:id", async (c) => {
     return c.json({ error: "Not found" }, 404);
   }
   return c.json({ approval: record });
+});
+
+/** POST /approvals/:id/decision — record a decision from the web UI */
+approvals.post("/:id/decision", async (c) => {
+  const userId = c.req.header("X-User-Id")?.trim();
+  if (!userId) return c.json({ error: "X-User-Id required" }, 401);
+
+  const id = c.req.param("id");
+  const { approved, note } = await c.req.json<{ approved: boolean; note?: string }>();
+
+  const record = await getApprovalById(c.env.DB, id);
+  if (!record || record.user_id !== userId) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  if (record.status !== "pending") {
+    return c.json({ error: "Already decided" }, 400);
+  }
+
+  const status: ApprovalStatus = approved ? "approved" : "denied";
+  await updateApprovalStatus(c.env.DB, id, status, {
+    decisionNote: note ?? (approved ? "Approved via Web UI." : "Denied via Web UI."),
+  });
+
+  // Notify the workflow
+  try {
+    const { Client: WorkflowClient } = await import("@upstash/workflow");
+    const client = new WorkflowClient({ token: c.env.QSTASH_TOKEN });
+    await client.notify({
+      eventId: id,
+      eventData: {
+        approved,
+        operation: record.tool_name,
+        toolArgs: record.tool_args,
+        decidedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.warn(`[Approvals] Workflow notify failed for ${id}:`, String(err));
+  }
+
+  // Update Telegram message if it exists
+  if (record.telegram_message_id && record.telegram_chat_id) {
+    c.executionCtx.waitUntil(
+      answerCallbackQuery(c.env, "web-ui", record, approved ? "✅ Approved" : "❌ Denied", c.env.DB)
+    );
+  }
+
+  return c.json({ success: true, status });
 });
 
 export default approvals;
