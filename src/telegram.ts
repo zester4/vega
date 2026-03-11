@@ -436,7 +436,6 @@ function buildHelpMessage(): string {
         `/stats — System-wide tool usage statistics`,
         `/top_tools — Most used tools ranking`,
         `/clear_audit — Clear your audit logs`,
-        '/help - Help with a specific command',
         `/reset — Clear conversation history`,
         `/status — Agent status & heartbeat`,
         `/vault — Your stored API keys`,

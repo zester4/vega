@@ -87,7 +87,7 @@ interface AuditEntry {
   args_summary: string;
   status: "ok" | "error" | "denied";
   created_at: string;
-  duration_ms?: number;
+  duration_ms: number | null;
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────

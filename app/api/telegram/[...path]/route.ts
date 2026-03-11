@@ -43,6 +43,8 @@ async function proxy(
   };
   if (INTERNAL_SECRET) {
     workerHeaders["Authorization"] = `Bearer ${INTERNAL_SECRET}`;
+  } else if (process.env.TELEGRAM_INTERNAL_SECRET) {
+    workerHeaders["Authorization"] = `Bearer ${process.env.TELEGRAM_INTERNAL_SECRET}`;
   }
 
   try {
