@@ -510,6 +510,9 @@ function helpText(): void {
     ["/clear", "Clear the terminal"],
     ["/help", "Show this panel"],
     ["/tools", "List available agent tools"],
+    ["/stats", "Show system-wide usage statistics"],
+    ["/vault", "Show stored secrets hints"],
+    ["/memory", "Show stored memories"],
     ["/heartbeat", "Trigger system heartbeat/reflection"],
   ];
   for (const [cmd, desc] of cmds) {
@@ -680,6 +683,86 @@ async function main() {
         `\n${INDENT}${rgb(80, 220, 160)}✓${C.reset} Switched to session ` +
         `${rgb(160, 230, 180)}${sessionId}${C.reset}\n`
       );
+      prompt();
+      return;
+    }
+
+    if (input === "/stats") {
+      const stopSpinner = startSpinner(sessionId);
+      try {
+        const res = await fetch(`${WORKER_URL}/audit/stats`);
+        const stats = await res.json() as any;
+        stopSpinner();
+        console.log(`\n${INDENT}${rgb(120, 200, 255)}${C.bold}📊 System Statistics${C.reset}`);
+        console.log(`${INDENT}${C.gray}Total Executions :${C.reset} ${C.white}${stats.total_executions}${C.reset}`);
+        console.log(`${INDENT}${C.gray}Success Rate     :${C.reset} ${C.white}${(stats.success_rate * 100).toFixed(1)}%${C.reset}`);
+        console.log(`${INDENT}${C.gray}Avg Duration     :${C.reset} ${C.white}${stats.avg_duration.toFixed(0)}ms${C.reset}`);
+        console.log(`${INDENT}${C.gray}Unique Tools     :${C.reset} ${C.white}${stats.unique_tools}${C.reset}`);
+      } catch (err) {
+        stopSpinner();
+        renderErrorMessage(String(err));
+      }
+      prompt();
+      return;
+    }
+
+    if (input === "/vault") {
+      const stopSpinner = startSpinner(sessionId);
+      try {
+        const res = await fetch(`${WORKER_URL}/vault/keys`);
+        const data = await res.json() as any;
+        stopSpinner();
+        console.log(`\n${INDENT}${rgb(160, 220, 255)}${C.bold}🔐 Stored Secrets Hint${C.reset}`);
+        if (!data.secrets?.length) {
+          console.log(`${INDENT}${C.dim}No secrets stored.${C.reset}`);
+        } else {
+          data.secrets.forEach((s: any) => {
+            console.log(`${INDENT}${C.cyan}•${C.reset} ${C.bold}${s.key_name}${C.reset} ${C.dim}— ${s.hint}${C.reset}`);
+          });
+        }
+      } catch (err) {
+        stopSpinner();
+        renderErrorMessage(String(err));
+      }
+      prompt();
+      return;
+    }
+
+    if (input === "/memory") {
+      const stopSpinner = startSpinner(sessionId);
+      try {
+        // We reuse the session-based memory fetch logic if available, or list general
+        const res = await fetch(`${WORKER_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: "List my memories briefly", sessionId })
+        });
+        const data = await res.json() as any;
+        stopSpinner();
+        renderAgentResponse(data.reply ?? "No memories found.", 0);
+      } catch (err) {
+        stopSpinner();
+        renderErrorMessage(String(err));
+      }
+      prompt();
+      return;
+    }
+
+    if (input === "/clear") {
+      const stopSpinner = startSpinner(sessionId);
+      try {
+        await fetch(`${WORKER_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: "/reset", sessionId }) // Trigger server-side reset
+        });
+        stopSpinner();
+        banner(sessionId);
+        console.log(`\n${INDENT}${rgb(80, 220, 160)}✓${C.reset} Server-side history cleared.`);
+      } catch (err) {
+        stopSpinner();
+        renderErrorMessage(String(err));
+      }
       prompt();
       return;
     }

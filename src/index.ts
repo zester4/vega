@@ -81,12 +81,19 @@ app.use("*", async (c, next) => {
 
 app.options("*", (c) => new Response(null, { status: 204 }));
 
+// ─── Sub-Routers ──────────────────────────────────────────────────────────────
+app.route("/vault", vaultRoutes);
+app.route("/approvals", approvalsRoutes);
+app.route("/audit", auditRoutes);
+app.route("/triggers", triggersRouter);
+app.route("/cf-email", cfEmailRoutes);
+
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get("/health", (c) =>
   c.json({
     status: "ok",
     agent: "VEGA",
-    version: "2.0",
+    version: "2.1",
     timestamp: Date.now(),
     features: [
       "sub_agents",
@@ -160,7 +167,26 @@ app.get("/files/:path{.+$}", async (c) => {
   return new Response(object.body, { headers });
 });
 
+// ─── File Upload (Base64 -> R2) ───────────────────────────────────────────────
+// Accepts base64-encoded binary data from the agent (e.g., E2B outputs) and stores it natively.
+app.post("/files/upload", async (c) => {
+  const { path, base64, contentType } = await c.req.json<{ path: string, base64: string, contentType: string }>();
+  if (!c.env.FILES_BUCKET) {
+    return c.json({ error: "FILES_BUCKET not bound" }, 500);
+  }
 
+  const bytes = Uint8Array.from(atob(base64), ch => ch.charCodeAt(0));
+  await c.env.FILES_BUCKET.put(path, bytes, {
+    httpMetadata: { contentType },
+  });
+
+  return c.json({
+    success: true,
+    path,
+    url: `${c.env.WORKER_URL}/files/${path}`,
+    size: bytes.length,
+  });
+});
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 // Primary conversational endpoint. Always streams via SSE (x-stream: true is default).
 // Tool events are emitted in real-time as the agent executes tools.

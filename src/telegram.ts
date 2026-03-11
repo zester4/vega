@@ -408,7 +408,10 @@ function buildStartMessage(firstName: string): string {
         `🎯 <b>Goal Tracking</b>  —  Long-term goal pursuit across sessions`,
         ``,
         `<b>Commands:</b>`,
-        `/help — Full command list`,
+        `/about — Detailed agent information`,
+        `/stats — System-wide tool usage statistics`,
+        `/top_tools — Most used tools ranking`,
+        `/clear_audit — Clear your audit logs`,
         `/reset — Clear conversation history`,
         `/status — Agent status & heartbeat`,
         `/vault — Your stored API keys`,
@@ -429,6 +432,11 @@ function buildHelpMessage(): string {
         ``,
         `/start — Welcome message & capabilities`,
         `/help — This reference`,
+        `/about — Detailed agent information`,
+        `/stats — System-wide tool usage statistics`,
+        `/top_tools — Most used tools ranking`,
+        `/clear_audit — Clear your audit logs`,
+        '/help - Help with a specific command',
         `/reset — Clear conversation history`,
         `/status — Agent status & heartbeat`,
         `/vault — Your stored API keys`,
@@ -577,6 +585,46 @@ function buildGoalsMessage(
     return lines.join("\n").trim();
 }
 
+function buildAboutMessage(): string {
+    return [
+        `🤖 <b>About VEGA</b>`,
+        ``,
+        `VEGA is a next-generation autonomous AI agent built on <b>Cloudflare Workers Edge</b> and <b>Upstash Workflow</b>.`,
+        ``,
+        `<b>Technical Stack:</b>`,
+        `• <b>Core:</b> Hono + TypeScript`,
+        `• <b>Intelligence:</b> Gemini 2.0 Flash / Pro`,
+        `• <b>Compute:</b> E2B Code Interpreter`,
+        `• <b>Storage:</b> Cloudflare D1 (SQL) & R2 (Files)`,
+        `• <b>Memory:</b> Upstash Vector & Redis`,
+        `• <b>Queue:</b> Upstash QStash`,
+        ``,
+        `<i>VEGA is designed to be proactive, persistent, and highly extendable. It can build its own tools and recall everything it learns about you.</i>`,
+    ].join("\n");
+}
+
+function buildStatsMessage(stats: { total_executions: number; success_rate: number; avg_duration: number; unique_tools: number }): string {
+    return [
+        `📊 <b>System Performance Statistics</b>`,
+        ``,
+        `• <b>Total Executions:</b>  <code>${stats.total_executions}</code>`,
+        `• <b>Success Rate:</b>  <code>${(stats.success_rate * 100).toFixed(1)}%</code>`,
+        `• <b>Avg Duration:</b>  <code>${stats.avg_duration.toFixed(0)}ms</code>`,
+        `• <b>Unique Tools Used:</b>  <code>${stats.unique_tools}</code>`,
+        ``,
+        `<i>Stats are aggregated from the global audit log.</i>`,
+    ].join("\n");
+}
+
+function buildTopToolsMessage(tools: Array<{ name: string; count: number }>): string {
+    const lines = [`🏆 <b>Top Tools by Usage</b>`, ``];
+    tools.forEach((t, i) => {
+        const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "🔹";
+        lines.push(`${medal} <code>${escapeHtml(t.name)}</code>  ·  <b>${t.count}</b>`);
+    });
+    return lines.join("\n");
+}
+
 // ─── Progress Message Builder ─────────────────────────────────────────────────
 
 /**
@@ -641,6 +689,36 @@ async function handleCommand(
 
         case "/help": {
             await bot.sendMessage(chatId, buildHelpMessage(), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/about": {
+            await bot.sendMessage(chatId, buildAboutMessage(), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/stats": {
+            const { executeTool } = await import("./tools/builtins");
+            const result = await executeTool("read_audit_log", { action: "stats" }, env) as any;
+            await bot.sendMessage(chatId, buildStatsMessage(result), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/top_tools": {
+            const { executeTool } = await import("./tools/builtins");
+            const result = await executeTool("read_audit_log", { action: "top_tools", limit: 5 }, env) as any;
+            await bot.sendMessage(chatId, buildTopToolsMessage(result.tools ?? []), { parse_mode: "HTML" });
+            break;
+        }
+
+        case "/clear_audit": {
+            const { executeTool } = await import("./tools/builtins");
+            const { getRedis } = await import("./memory");
+            const redis = getRedis(env);
+            const sessionId = await redis.get(`tg:session:${chatId}`) as string | null;
+
+            await executeTool("read_audit_log", { action: "clear", sessionId: sessionId ?? undefined }, env);
+            await bot.sendMessage(chatId, `🗑️ <b>Audit logs cleared for your session.</b>`, { parse_mode: "HTML" });
             break;
         }
 

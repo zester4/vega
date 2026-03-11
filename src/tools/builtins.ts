@@ -94,6 +94,7 @@ import { TRIGGER_TOOL_DECLARATIONS, executeTriggerTool } from "../routes/trigger
 import { PROFILE_TOOL_DECLARATIONS, executeProfileTool } from "../routes/profile";
 import { CAPTCHA_TOOL_DECLARATIONS, executeCaptchaTool } from "./captcha";
 import { LONG_RUNNING_DECLARATIONS, executeLongRunningTool } from "../long-running";
+import { execCloudflareAdmin } from "./cloudflare-admin";
 
 // ─── Tool Usage Batching ──────────────────────────────────────────────────────
 // In-process tool usage accumulator
@@ -302,6 +303,21 @@ export const BUILTIN_DECLARATIONS = [
         contentType: { type: "string", description: "MIME type e.g. 'text/markdown', 'application/json', 'text/plain' (default: text/plain)" },
       },
       required: ["path", "content"],
+    },
+  },
+
+  {
+    name: "upload_file_binary",
+    description:
+      "Upload binary file content (base64-encoded) to R2 persistent storage. Use after run_code generates binary output (PDFs, images, Excel files, zip archives). The run_code output should include the base64 string. Returns a public URL.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Storage path e.g. 'reports/analysis.pdf'" },
+        base64: { type: "string", description: "Base64-encoded file content" },
+        contentType: { type: "string", description: "MIME type e.g. 'application/pdf'" },
+      },
+      required: ["path", "base64", "contentType"],
     },
   },
 
@@ -1195,6 +1211,7 @@ async function executeToolInner(
 
       // Files
       case "write_file": return await execWriteFile(args, env);
+      case "upload_file_binary": return await execUploadFileBinary(args, env);
       case "read_file": return await execReadFile(args, env);
       case "list_files": return await execListFiles(args, env);
       case "delete_file": return await execDeleteFile(args, env);
@@ -1212,6 +1229,9 @@ async function executeToolInner(
       case "get_agent_result": return await execGetAgentResult(args, env);
       case "list_agents": return await execListAgents(args, env);
       case "cancel_agent": return await execCancelAgent(args, env);
+
+      // Cloudflare Admin
+      case "cloudflare_admin": return await execCloudflareAdmin(args, env);
       // Tool Creation & Lifecycle
       case "create_tool":
         return await execCreateTool(args, env, resolvedUserId);
@@ -1256,10 +1276,6 @@ async function executeToolInner(
       // Web Scraping
       case "firecrawl": return await execFirecrawlTool(args, env);
 
-      case "cloudflare_admin": {
-        const { execCloudflareAdmin } = await import("./cloudflare-admin");
-        return execCloudflareAdmin(args, env);
-      }
 
       case "create_trigger":
       case "list_triggers":
@@ -1985,6 +2001,32 @@ async function execReadAgentMemory(args: ToolArgs, env: Env): Promise<Record<str
 // ═══════════════════════════════════════════════════════════════════════════════
 // FILE IMPLEMENTATIONS (Cloudflare R2)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+async function execUploadFileBinary(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
+  const { path, base64, contentType } = args as { path: string; base64: string; contentType: string };
+  if (!env.FILES_BUCKET) {
+    return { error: "FILES_BUCKET R2 binding not configured. Add it to wrangler.toml." };
+  }
+  try {
+    const bytes = Uint8Array.from(atob(base64), ch => ch.charCodeAt(0));
+    await env.FILES_BUCKET.put(path, bytes, {
+      httpMetadata: { contentType },
+      customMetadata: {
+        createdAt: new Date().toISOString(),
+        size: String(bytes.length),
+      },
+    });
+    return {
+      success: true,
+      path,
+      url: `${env.WORKER_URL}/files/${path}`,
+      size: bytes.length,
+      contentType,
+    };
+  } catch (err) {
+    return { error: `Failed to decode and upload base64: ${String(err)}` };
+  }
+}
 
 async function execWriteFile(args: ToolArgs, env: Env): Promise<Record<string, unknown>> {
   const { path, content, contentType = "text/plain" } = args as {

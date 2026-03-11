@@ -1,3 +1,4 @@
+//app/settings/page.tsx
 "use client";
 
 /**
@@ -14,7 +15,8 @@ import {
   BotIcon, SendIcon, CheckCircleIcon, XCircleIcon, RefreshCwIcon,
   Trash2Icon, AlertTriangleIcon, ExternalLinkIcon, EyeIcon, EyeOffIcon,
   ZapIcon, MessageSquareIcon, ClockIcon, WifiIcon, WifiOffIcon,
-  CopyIcon, CheckIcon, PhoneIcon,
+  CopyIcon, CheckIcon, PhoneIcon, ShieldCheckIcon, ShieldAlertIcon,
+  LockIcon, KeyIcon, FileTextIcon, ActivityIcon, PlusIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -72,6 +74,22 @@ interface WaActivityItem {
   ts: number;
 }
 
+interface VaultSecret {
+  key_name: string;
+  hint: string;
+  description: string | null;
+  updated_at: string;
+}
+
+interface AuditEntry {
+  id: string;
+  tool_name: string;
+  args_summary: string;
+  status: "ok" | "error" | "denied";
+  created_at: string;
+  duration_ms?: number;
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
@@ -79,6 +97,8 @@ export default function SettingsPage() {
   const [whatsappStatus, setWhatsappStatus] = useState<WhatsAppStatus | null>(null);
   const [tgActivity, setTgActivity] = useState<TgActivityItem[]>([]);
   const [waActivity, setWaActivity] = useState<WaActivityItem[]>([]);
+  const [vaultSecrets, setVaultSecrets] = useState<VaultSecret[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchTgStatus = useCallback(async () => {
@@ -110,18 +130,39 @@ export default function SettingsPage() {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchVault = useCallback(async () => {
+    try {
+      const d = await api<{ secrets: VaultSecret[] }>("GET", "/vault/keys");
+      setVaultSecrets(d.secrets ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchAudit = useCallback(async () => {
+    try {
+      const d = await api<{ entries: AuditEntry[] }>("GET", "/audit?limit=20");
+      setAuditLogs(d.entries ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     fetchTgStatus();
     fetchWaStatus();
     fetchTgActivity();
     fetchWaActivity();
+    fetchVault();
+    fetchAudit();
 
     const i1 = setInterval(fetchTgStatus, 15_000);
     const i2 = setInterval(fetchWaStatus, 15_000);
     const i3 = setInterval(fetchTgActivity, 10_000);
     const i4 = setInterval(fetchWaActivity, 10_000);
-    return () => { clearInterval(i1); clearInterval(i2); clearInterval(i3); clearInterval(i4); };
-  }, [fetchTgStatus, fetchWaStatus, fetchTgActivity, fetchWaActivity]);
+    const i5 = setInterval(fetchVault, 30_000);
+    const i6 = setInterval(fetchAudit, 15_000);
+    return () => {
+      clearInterval(i1); clearInterval(i2); clearInterval(i3);
+      clearInterval(i4); clearInterval(i5); clearInterval(i6);
+    };
+  }, [fetchTgStatus, fetchWaStatus, fetchTgActivity, fetchWaActivity, fetchVault, fetchAudit]);
 
   if (loading) {
     return (
@@ -153,6 +194,18 @@ export default function SettingsPage() {
           status={whatsappStatus}
           activity={waActivity}
           onRefresh={fetchWaStatus}
+        />
+
+        {/* ── Vault (Secrets) ───────────────────────────────────────────────── */}
+        <VaultSection
+          secrets={vaultSecrets}
+          onRefresh={fetchVault}
+        />
+
+        {/* ── Audit Logs ────────────────────────────────────────────────────── */}
+        <AuditLogSection
+          entries={auditLogs}
+          onRefresh={fetchAudit}
         />
 
         {/* ── Danger Zone ───────────────────────────────────────────────────── */}
@@ -636,4 +689,130 @@ function formatRelTime(ts: number): string {
   if (d < 3_600_000) return `${Math.floor(d / 60_000)}m ago`;
   if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
   return `${Math.floor(d / 86_400_000)}d ago`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VAULT SECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function VaultSection({ secrets, onRefresh }: { secrets: VaultSecret[]; onRefresh: () => void }) {
+  const [keyName, setKeyName] = useState("");
+  const [value, setValue] = useState("");
+  const [desc, setDesc] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    if (!keyName.trim() || !value.trim()) return;
+    setSaving(true); setError(null);
+    try {
+      await api("POST", "/vault/keys", { key_name: keyName, value, description: desc });
+      setKeyName(""); setValue(""); setDesc(""); onRefresh();
+    } catch (e) { setError(String(e)); }
+    finally { setSaving(false); }
+  };
+
+  const handleDelete = async (kn: string) => {
+    if (!confirm(`Delete secret ${kn}?`)) return;
+    try { await api("DELETE", `/vault/keys/${kn}`); onRefresh(); }
+    catch (e) { alert(String(e)); }
+  };
+
+  return (
+    <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+            <LockIcon className="size-4 sm:size-5 text-emerald-400" />
+          </div>
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">Secrets Vault</h2>
+            <p className="text-[10px] sm:text-xs text-[#6b6b7a]">Securely store API keys for integrations</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 divide-y divide-[#1e1e22] overflow-hidden">
+        <div className="p-4 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <input placeholder="key_name (e.g. openai_key)" value={keyName} onChange={e => setKeyName(e.target.value)} className="bg-[#1a1a1f] border border-[#2a2a30] rounded-lg px-3 py-2 text-xs text-[#e8e8ea] focus:outline-none focus:border-emerald-500/40 transition-colors" />
+            <input type="password" placeholder="secret value" value={value} onChange={e => setValue(e.target.value)} className="bg-[#1a1a1f] border border-[#2a2a30] rounded-lg px-3 py-2 text-xs text-[#e8e8ea] focus:outline-none focus:border-emerald-500/40 transition-colors" />
+          </div>
+          <div className="flex gap-2">
+            <input placeholder="Description (optional)" value={desc} onChange={e => setDesc(e.target.value)} className="flex-1 bg-[#1a1a1f] border border-[#2a2a30] rounded-lg px-3 py-2 text-xs text-[#e8e8ea] focus:outline-none focus:border-emerald-500/40 transition-colors" />
+            <button onClick={handleSave} disabled={saving || !keyName || !value} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition-colors disabled:opacity-50 min-w-10 flex items-center justify-center">
+              {saving ? <RefreshCwIcon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+            </button>
+          </div>
+          {error && <p className="text-[10px] text-red-400">{error}</p>}
+        </div>
+
+        {secrets.length === 0 ? (
+          <div className="p-8 text-center text-[#4a4a58] text-xs">No secrets stored.</div>
+        ) : (
+          secrets.map(s => (
+            <div key={s.key_name} className="p-4 flex items-center justify-between gap-4 hover:bg-[#1a1a1f]/30 transition-colors">
+              <div className="flex items-center gap-3">
+                <KeyIcon className="size-4 text-[#6b6b7a]" />
+                <div>
+                  <p className="text-xs font-bold text-[#e8e8ea]">{s.key_name}</p>
+                  <p className="text-[10px] text-[#4a4a58] font-mono">{s.hint}</p>
+                </div>
+              </div>
+              <button onClick={() => handleDelete(s.key_name)} className="p-2 text-[#4a4a58] hover:text-red-400 transition-colors">
+                <Trash2Icon className="size-3.5" />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </motion.section>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUDIT LOG SECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function AuditLogSection({ entries, onRefresh }: { entries: AuditEntry[]; onRefresh: () => void }) {
+  return (
+    <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }} className="space-y-4">
+       <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex size-8 sm:size-9 items-center justify-center rounded-lg bg-amber-500/10 border border-amber-500/20">
+            <ActivityIcon className="size-4 sm:size-5 text-amber-400" />
+          </div>
+          <div>
+            <h2 className="text-sm sm:text-base font-bold text-[#e8e8ea]">Execution Audit Log</h2>
+            <p className="text-[10px] sm:text-xs text-[#6b6b7a]">History of agent tool operations</p>
+          </div>
+        </div>
+        <button onClick={onRefresh} className="p-2 text-[#6b6b7a] hover:text-[#e8e8ea] transition-colors"><RefreshCwIcon className="size-4" /></button>
+      </div>
+
+      <div className="rounded-xl border border-[#1e1e22] bg-[#111113]/80 overflow-hidden shadow-sm">
+        {entries.length === 0 ? (
+          <div className="p-10 text-center text-[#4a4a58] text-xs italic">No entries recorded yet.</div>
+        ) : (
+          <div className="divide-y divide-[#1e1e22]/50">
+            {entries.map(e => (
+              <div key={e.id} className="p-3 hover:bg-[#1a1a1f]/40 transition-colors flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`size-1.5 rounded-full shrink-0 ${e.status === 'ok' ? 'bg-emerald-500' : e.status === 'denied' ? 'bg-amber-500' : 'bg-red-500'}`} />
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-[#e8e8ea] truncate">{e.tool_name}</p>
+                    <p className="text-[10px] text-[#4a4a58] truncate font-mono">{e.args_summary}</p>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                   <p className="text-[10px] text-[#4a4a58] font-mono">{formatRelTime(new Date(e.created_at).getTime())}</p>
+                   {e.duration_ms && <p className="text-[9px] text-[#3a3a44] font-mono">{e.duration_ms}ms</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </motion.section>
+  );
 }
